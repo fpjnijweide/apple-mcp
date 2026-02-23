@@ -19,13 +19,34 @@ import { type Tool } from "@modelcontextprotocol/sdk/types.js";
 
 const CONTACTS_TOOL: Tool = {
     name: "contacts",
-    description: "Search and retrieve contacts from Apple Contacts app. MANDATORY: Use this tool FIRST when user asks about messaging someone by name. This returns the real phone numbers needed for the messages tool.",
+    description: "Search, retrieve, edit, and delete contacts from Apple Contacts app. MANDATORY: Use this tool FIRST when user asks about messaging someone by name. This returns the real phone numbers needed for the messages tool.",
     inputSchema: {
       type: "object",
       properties: {
+        operation: {
+          type: "string",
+          enum: ["search", "edit", "delete"],
+          description: "Operation to perform: 'search' to find contacts (default), 'edit' to update a contact's fields, 'delete' to remove a contact"
+        },
         name: {
           type: "string",
-          description: "Name to search for (optional - if not provided, returns all contacts). Can be partial name to search. REQUIRED step before using messages tool with a person's name."
+          description: "Name to search for, edit, or delete. For search: partial name match. For edit/delete: must match exactly one contact."
+        },
+        birthday: {
+          type: "string",
+          description: "New birthday value for edit operation (e.g. '1996-02-24'). Pass empty string to clear."
+        },
+        phone: {
+          type: "string",
+          description: "Phone number to add for edit operation. Pass empty string to clear all phones."
+        },
+        email: {
+          type: "string",
+          description: "Email address to add for edit operation. Pass empty string to clear all emails."
+        },
+        newName: {
+          type: "string",
+          description: "New name for edit operation (to rename a contact)"
         }
       }
     }
@@ -107,8 +128,8 @@ const CONTACTS_TOOL: Tool = {
       properties: {
         operation: {
           type: "string",
-          description: "Operation to perform: 'unread', 'search', 'send', 'mailboxes', 'accounts', or 'latest'",
-          enum: ["unread", "search", "send", "mailboxes", "accounts", "latest"]
+          description: "Operation to perform: 'unread' (list unread emails with short previews), 'latest' (list recent emails with short previews), 'search' (find emails by keyword with short previews), 'open' (get the FULL content of one email - use subject from a previous list result), 'send', 'mailboxes', or 'accounts'.",
+          enum: ["unread", "search", "open", "send", "mailboxes", "accounts", "latest"]
         },
         account: {
           type: "string",

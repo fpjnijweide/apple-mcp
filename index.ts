@@ -237,15 +237,64 @@ function initServer() {
 					try {
 						const contactsModule = await loadModule("contacts");
 
+						if (args.operation === "delete") {
+							if (!args.name) {
+								return {
+									content: [{ type: "text", text: "Name is required for delete operation." }],
+									isError: true,
+								};
+							}
+							const result = await contactsModule.deleteContact(args.name);
+							return {
+								content: [{ type: "text", text: result.message }],
+								isError: !result.success,
+							};
+						}
+
+						if (args.operation === "edit") {
+							if (!args.name) {
+								return {
+									content: [{ type: "text", text: "Name is required for edit operation." }],
+									isError: true,
+								};
+							}
+							const updates: Record<string, string | null> = {};
+							if ("birthday" in args) updates.birthday = args.birthday === "" ? null : args.birthday;
+							if ("phone" in args) updates.phone = args.phone === "" ? null : args.phone;
+							if ("email" in args) updates.email = args.email === "" ? null : args.email;
+							if ("newName" in args) updates.newName = args.newName;
+							const result = await contactsModule.editContact(args.name, updates);
+							return {
+								content: [{ type: "text", text: result.message }],
+								isError: !result.success,
+							};
+						}
+
 						if (args.name) {
-							const numbers = await contactsModule.findNumber(args.name);
+							const contacts = await contactsModule.findContacts(args.name);
+							if (contacts.length === 0) {
+								return {
+									content: [
+										{
+											type: "text",
+											text: `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`,
+										},
+									],
+									isError: false,
+								};
+							}
+							const formatted = contacts.map((c: any) => {
+								const parts = [c.name];
+								if (c.phones.length > 0) parts.push(`Phone: ${c.phones.join(", ")}`);
+								if (c.emails.length > 0) parts.push(`Email: ${c.emails.join(", ")}`);
+								if (c.birthday) parts.push(`Birthday: ${c.birthday}`);
+								return parts.join("\n");
+							});
 							return {
 								content: [
 									{
 										type: "text",
-										text: numbers.length
-											? `${args.name}: ${numbers.join(", ")}`
-											: `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`,
+										text: `Found ${contacts.length} contact${contacts.length > 1 ? "s" : ""} matching "${args.name}":\n\n${formatted.join("\n\n")}`,
 									},
 								],
 								isError: false,
@@ -267,8 +316,8 @@ function initServer() {
 							}
 
 							const formattedContacts = Object.entries(allNumbers)
-								.filter(([_, phones]) => phones.length > 0)
-								.map(([name, phones]) => `${name}: ${phones.join(", ")}`);
+								.filter(([_, phones]: [string, any]) => phones.length > 0)
+								.map(([name, phones]: [string, any]) => `${name}: ${phones.join(", ")}`);
 
 							return {
 								content: [
@@ -481,7 +530,7 @@ function initServer() {
 								};
 							}
 
-							case "read": {
+							case "open": {
 								const messages = await messageModule.readMessages(
 									resolvedPhoneNumber,
 									args.limit,
@@ -744,6 +793,36 @@ end tell`;
 								};
 							}
 
+							case "open": {
+								if (!args.subject) {
+									throw new Error(
+										"Subject is required for read operation (use the subject from a search/unread/latest result)",
+									);
+								}
+								const email = await mailModule.readMail(
+									args.subject,
+									args.searchTerm,
+									args.mailbox,
+								);
+								const attSection = email?.attachments?.length
+									? `\n\nAttachments (${email.attachments.length}):\n` +
+										email.attachments.map((a: any) =>
+											`- ${a.name} (${a.mimeType}) → ${a.path}`
+										).join("\n")
+									: "";
+								return {
+									content: [
+										{
+											type: "text",
+											text: email
+												? `From: ${email.sender}\nDate: ${email.dateSent}\nSubject: ${email.subject}\nMailbox: ${email.mailbox}${attSection}\n\n${email.content}`
+												: `No email found with subject "${args.subject}"`,
+										},
+									],
+									isError: false,
+								};
+							}
+
 							case "send": {
 								if (!args.to || !args.subject || !args.body) {
 									throw new Error(
@@ -814,16 +893,7 @@ end tell`;
 							}
 
 							case "latest": {
-								let account = args.account;
-								if (!account) {
-									const accounts = await mailModule.getAccounts();
-									if (accounts.length === 0) {
-										throw new Error(
-											"No email accounts found. Make sure Mail app is configured with at least one account.",
-										);
-									}
-									account = accounts[0]; // Use the first account if not provided
-								}
+								const account = args.account || undefined;
 								const emails = await mailModule.getLatestMails(
 									account,
 									args.limit,
@@ -834,14 +904,14 @@ end tell`;
 											type: "text",
 											text:
 												emails.length > 0
-													? `Found ${emails.length} latest email(s) in account "${account}":\n\n` +
+													? `Found ${emails.length} latest email(s)${account ? ` in account "${account}"` : ""}:\n\n` +
 														emails
 															.map(
 																(email: any) =>
 																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
 															)
 															.join("\n\n")
-													: `No latest emails found in account "${account}"`,
+													: `No latest emails found${account ? ` in account "${account}"` : ""}`,
 										},
 									],
 									isError: false,
@@ -1367,12 +1437,15 @@ end tell`;
 }
 
 // Helper functions for argument type checking
-function isContactsArgs(args: unknown): args is { name?: string } {
-	return (
-		typeof args === "object" &&
-		args !== null &&
-		(!("name" in args) || typeof (args as { name: string }).name === "string")
-	);
+function isContactsArgs(args: unknown): args is {
+	operation?: string;
+	name?: string;
+	birthday?: string;
+	phone?: string;
+	email?: string;
+	newName?: string;
+} {
+	return typeof args === "object" && args !== null;
 }
 
 function isNotesArgs(args: unknown): args is {
@@ -1469,7 +1542,7 @@ function isMessagesArgs(args: unknown): args is {
 }
 
 function isMailArgs(args: unknown): args is {
-	operation: "unread" | "search" | "send" | "mailboxes" | "accounts" | "latest";
+	operation: "unread" | "search" | "open" | "send" | "mailboxes" | "accounts" | "latest";
 	account?: string;
 	mailbox?: string;
 	limit?: number;
@@ -1497,7 +1570,7 @@ function isMailArgs(args: unknown): args is {
 
 	if (
 		!operation ||
-		!["unread", "search", "send", "mailboxes", "accounts", "latest"].includes(
+		!["unread", "search", "open", "send", "mailboxes", "accounts", "latest"].includes(
 			operation,
 		)
 	) {
