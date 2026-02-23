@@ -206,39 +206,33 @@ tell application "Mail"
         set output to output & "${MSG_SEP}" & subj & "${FIELD_SEP}" & sndr & "${FIELD_SEP}" & dt & "${FIELD_SEP}" & isRead & "${FIELD_SEP}" & "Inbox" & "${FIELD_SEP}" & cont
     end repeat
 
-    -- If not enough results, search other mailboxes on enabled accounts
+    -- If not enough results, search All Mail on enabled accounts (fast single query)
     if count_ < lim then
         repeat with acct in accounts
             if enabled of acct then
-                repeat with mb in mailboxes of acct
-                    set mbN to name of mb
-                    if mbN is not "INBOX" and mbN is not "Inbox" and mbN is not "All Mail" and mbN is not "Alle e-mail" then
+                try
+                    set mb to mailbox "All Mail" of acct
+                    set matched to (messages of mb whose subject contains "${cleanTerm}" or sender contains "${cleanTerm}")
+                    repeat with i from 1 to (count of matched)
+                        if count_ >= lim then exit repeat
+                        set m to item i of matched
+                        set count_ to count_ + 1
+                        set subj to subject of m
+                        set sndr to sender of m
+                        set dt to ((date sent of m) as string)
+                        set isRead to (read status of m) as string
+                        set cont to ""
                         try
-                            set matched to (messages of mb whose subject contains "${cleanTerm}" or sender contains "${cleanTerm}")
-                            set mbName to name of mb
-                            repeat with i from 1 to (count of matched)
-                                if count_ >= lim then exit repeat
-                                set m to item i of matched
-                                set count_ to count_ + 1
-                                set subj to subject of m
-                                set sndr to sender of m
-                                set dt to ((date sent of m) as string)
-                                set isRead to (read status of m) as string
-                                set cont to ""
-                                try
-                                    set cont to content of m
-                                    if (length of cont) > ${contentLen} then
-                                        set cont to (text 1 thru ${contentLen} of cont) & "..."
-                                    end if
-                                on error
-                                    set cont to ""
-                                end try
-                                set output to output & "${MSG_SEP}" & subj & "${FIELD_SEP}" & sndr & "${FIELD_SEP}" & dt & "${FIELD_SEP}" & isRead & "${FIELD_SEP}" & mbName & "${FIELD_SEP}" & cont
-                            end repeat
+                            set cont to content of m
+                            if (length of cont) > ${contentLen} then
+                                set cont to (text 1 thru ${contentLen} of cont) & "..."
+                            end if
+                        on error
+                            set cont to ""
                         end try
-                    end if
-                    if count_ >= lim then exit repeat
-                end repeat
+                        set output to output & "${MSG_SEP}" & subj & "${FIELD_SEP}" & sndr & "${FIELD_SEP}" & dt & "${FIELD_SEP}" & isRead & "${FIELD_SEP}" & "All Mail" & "${FIELD_SEP}" & cont
+                    end repeat
+                end try
             end if
             if count_ >= lim then exit repeat
         end repeat
@@ -573,16 +567,10 @@ async function readMail(subject: string, sender?: string, mailbox?: string): Pro
     if (count of matched) = 0 then
         repeat with acct in accounts
             if enabled of acct then
-                repeat with mb in mailboxes of acct
-                    set mbN to name of mb
-                    if mbN is not "All Mail" and mbN is not "Alle e-mail" then
-                        try
-                            set matched to (messages of mb whose subject contains "${cleanSubject}"${senderWhose})
-                            if (count of matched) > 0 then exit repeat
-                        end try
-                    end if
-                end repeat
-                if (count of matched) > 0 then exit repeat
+                try
+                    set matched to (messages of mailbox "All Mail" of acct whose subject contains "${cleanSubject}"${senderWhose})
+                    if (count of matched) > 0 then exit repeat
+                end try
             end if
         end repeat
     end if`;
