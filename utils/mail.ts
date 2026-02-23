@@ -504,19 +504,12 @@ function extractHtmlFromMime(source: string): string {
 }
 
 /**
- * Read the full content of a specific email by subject (and optionally sender/date)
+ * Read the full content of a specific email by subject (and optionally sender/date).
+ * Reads the .emlx file directly from disk — no AppleScript needed.
  */
 async function readMail(subject: string, sender?: string, mailbox?: string): Promise<EmailMessage | null> {
   try {
-    const accessResult = await requestMailAccess();
-    if (!accessResult.hasAccess) throw new Error(accessResult.message);
-
     if (!subject || !subject.trim()) throw new Error("Subject is required to identify the email");
-
-    const tmpBase = os.tmpdir();
-    const timestamp = Date.now();
-    const tmpDir = `${tmpBase}/mail-attachments-${timestamp}`;
-    const srcFile = `${tmpBase}/mail-source-${timestamp}.txt`;
 
     // Step 1: Find message via SQLite Envelope Index (instant)
     const cleanSubject = subject.replace(/'/g, "''");
@@ -534,6 +527,7 @@ async function readMail(subject: string, sender?: string, mailbox?: string): Pro
 SELECT m.ROWID as msg_id, s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
        datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
        m.read,
+       mb.url as mailbox_url,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name
 FROM messages m
 JOIN subjects s ON m.subject = s.ROWID
@@ -548,72 +542,33 @@ LIMIT 1;`;
 
     const rows = queryEnvelopeDb<{
       msg_id: number; subject: string; sender: string;
-      dt: string; read: number; mailbox_name: string;
+      dt: string; read: number; mailbox_url: string; mailbox_name: string;
     }>(sql);
 
     if (rows.length === 0) return null;
 
     const meta = rows[0];
     const msgId = meta.msg_id;
-    const mbName = meta.mailbox_name;
 
-    // Step 2: Get source + attachments via direct osascript (avoids AppleEvent size limit)
-    // Find message by ID across enabled accounts in the known mailbox
-    const cleanMb = mbName.replace(/"/g, '\\"');
-    const attFile = `${tmpBase}/mail-att-info-${timestamp}.txt`;
-    const srcScript = `
-tell application "Mail"
-    set m to missing value
-    repeat with acct in accounts
-        try
-            set mb to mailbox "${cleanMb}" of acct
-            set msgs to (messages of mb whose id is ${msgId})
-            if (count of msgs) > 0 then
-                set m to item 1 of msgs
-                exit repeat
-            end if
-        end try
-    end repeat
-    if m is missing value then return
-    set src to source of m
-    do shell script "/usr/bin/printf '%s' " & quoted form of src & " > " & quoted form of "${srcFile}"
+    // Step 2: Find .emlx file on disk (fast — scoped to account directory)
+    const urlPath = meta.mailbox_url.substring(meta.mailbox_url.indexOf('://') + 3);
+    const accountUuid = urlPath.substring(0, urlPath.indexOf('/'));
+    const accountDir = `${os.homedir()}/Library/Mail/V10/${accountUuid}`;
 
-    set attCount to count of mail attachments of m
-    if attCount > 0 then
-        do shell script "mkdir -p " & quoted form of "${tmpDir}"
-        -- Collect names first, then save (accessing properties after save can fail)
-        set attNames to {}
-        repeat with att in mail attachments of m
-            set end of attNames to name of att
-        end repeat
-        repeat with i from 1 to attCount
-            set attName to item i of attNames
-            set savePath to "${tmpDir}/" & attName
-            try
-                save (mail attachment i of m) in POSIX file savePath
-            end try
-        end repeat
-        -- Write info via shell (MIME type property causes -10000, derive from extension)
-        repeat with attName in attNames
-            do shell script "echo " & quoted form of (attName as text) & " >> " & quoted form of "${attFile}"
-        end repeat
-    end if
-end tell`;
-
+    let emlxPath = '';
     try {
-      await execFileAsync("osascript", ["-e", srcScript], { timeout: 30000, maxBuffer: 1024 * 1024 * 5 });
+      const { stdout } = await execFileAsync('find', [
+        accountDir, '-type', 'f', '(',
+        '-name', `${msgId}.partial.emlx`,
+        '-o', '-name', `${msgId}.emlx`,
+        ')',
+      ], { timeout: 5000 });
+      emlxPath = stdout.trim().split('\n')[0] || '';
     } catch {}
 
-    // Read source from temp file
-    let rawSource = "";
-    try {
-      rawSource = fs.readFileSync(srcFile, "utf-8");
-      fs.unlinkSync(srcFile);
-    } catch {}
+    let content = '';
+    const attachments: EmailAttachment[] = [];
 
-    const content = extractHtmlFromMime(rawSource.trim());
-
-    // Parse attachment info from temp file
     const mimeTypes: Record<string, string> = {
       pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg",
       png: "image/png", gif: "image/gif", doc: "application/msword",
@@ -621,21 +576,43 @@ end tell`;
       xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       zip: "application/zip", txt: "text/plain", csv: "text/csv", html: "text/html",
     };
-    const attachments: EmailAttachment[] = [];
-    try {
-      const attData = fs.readFileSync(attFile, "utf-8").trim();
-      fs.unlinkSync(attFile);
-      if (attData) {
-        for (const attName of attData.split("\n").filter(Boolean)) {
-          const ext = attName.split(".").pop()?.toLowerCase() || "";
-          attachments.push({
-            name: attName.trim(),
-            mimeType: mimeTypes[ext] || "application/octet-stream",
-            path: `${tmpDir}/${attName.trim()}`,
-          });
-        }
+
+    if (emlxPath) {
+      // .emlx format: first line is byte count, then MIME source, then Apple plist
+      const rawBuffer = fs.readFileSync(emlxPath);
+      const firstNewline = rawBuffer.indexOf(0x0A);
+      const byteCount = parseInt(
+        rawBuffer.subarray(0, firstNewline).toString('utf-8'), 10,
+      );
+      const mimeSource = rawBuffer
+        .subarray(firstNewline + 1, firstNewline + 1 + byteCount)
+        .toString('utf-8');
+      content = extractHtmlFromMime(mimeSource.trim());
+
+      // Find attachments in sibling Attachments directory
+      const messagesDir = emlxPath.substring(0, emlxPath.lastIndexOf('/'));
+      const dataLevelDir = messagesDir.substring(0, messagesDir.lastIndexOf('/'));
+      const attDir = `${dataLevelDir}/Attachments/${msgId}`;
+
+      if (fs.existsSync(attDir)) {
+        try {
+          const { stdout: attFiles } = await execFileAsync(
+            'find', [attDir, '-type', 'f'], { timeout: 3000 },
+          );
+          for (const filePath of attFiles.trim().split('\n').filter(Boolean)) {
+            const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+            const ext = fileName.split('.').pop()?.toLowerCase() || '';
+            attachments.push({
+              name: fileName,
+              mimeType: mimeTypes[ext] || "application/octet-stream",
+              path: filePath,
+            });
+          }
+        } catch {}
       }
-    } catch {}
+    } else {
+      content = "[Email not downloaded locally]";
+    }
 
     return {
       subject: meta.subject || "No subject",
@@ -653,8 +630,130 @@ end tell`;
   }
 }
 
+/**
+ * Get unread emails for a specific account (and optionally mailbox) via AppleScript.
+ * Falls back to the general getUnreadMails if the account-specific query fails.
+ */
+async function getUnreadMailsForAccount(
+  account: string,
+  mailbox?: string,
+  limit = 10,
+): Promise<EmailMessage[]> {
+  const script = `
+tell application "Mail"
+    set resultList to {}
+    try
+        set targetAccount to first account whose name is "${account.replace(/"/g, '\\"')}"
+
+        set acctMailboxes to every mailbox of targetAccount
+
+        set mailboxesToSearch to acctMailboxes
+        ${
+          mailbox
+            ? `
+        set mailboxesToSearch to {}
+        repeat with mb in acctMailboxes
+            if name of mb is "${mailbox.replace(/"/g, '\\"')}" then
+                set mailboxesToSearch to {mb}
+                exit repeat
+            end if
+        end repeat
+        `
+            : ""
+        }
+
+        repeat with mb in mailboxesToSearch
+            try
+                set unreadMessages to (messages of mb whose read status is false)
+                if (count of unreadMessages) > 0 then
+                    set msgLimit to ${limit}
+                    if (count of unreadMessages) < msgLimit then
+                        set msgLimit to (count of unreadMessages)
+                    end if
+
+                    repeat with i from 1 to msgLimit
+                        try
+                            set currentMsg to item i of unreadMessages
+                            set msgData to {subject:(subject of currentMsg), sender:(sender of currentMsg), \u00ac
+                                        date:(date sent of currentMsg) as string, mailbox:(name of mb)}
+
+                            try
+                                set msgContent to content of currentMsg
+                                if length of msgContent > 500 then
+                                    set msgContent to (text 1 thru 500 of msgContent) & "..."
+                                end if
+                                set msgData to msgData & {content:msgContent}
+                            on error
+                                set msgData to msgData & {content:"[Content not available]"}
+                            end try
+
+                            set end of resultList to msgData
+                        on error
+                            -- Skip problematic messages
+                        end try
+                    end repeat
+
+                    if (count of resultList) \u2265 ${limit} then exit repeat
+                end if
+            on error
+                -- Skip problematic mailboxes
+            end try
+        end repeat
+    on error errMsg
+        return "Error: " & errMsg
+    end try
+
+    return resultList
+end tell`;
+
+  try {
+    const asResult = await runAppleScript(script);
+    if (asResult && asResult.startsWith("Error:")) {
+      throw new Error(asResult);
+    }
+
+    const emailData: EmailMessage[] = [];
+    const matches = asResult.match(/\{([^}]+)\}/g);
+    if (matches && matches.length > 0) {
+      for (const match of matches) {
+        try {
+          const props = match.substring(1, match.length - 1).split(",");
+          const email: any = {};
+          props.forEach((prop) => {
+            const parts = prop.split(":");
+            if (parts.length >= 2) {
+              const key = parts[0].trim();
+              const value = parts.slice(1).join(":").trim();
+              email[key] = value;
+            }
+          });
+          if (email.subject || email.sender) {
+            emailData.push({
+              subject: email.subject || "No subject",
+              sender: email.sender || "Unknown sender",
+              dateSent: email.date || new Date().toString(),
+              content: email.content || "[Content not available]",
+              isRead: false,
+              mailbox: `${account} - ${email.mailbox || "Unknown"}`,
+            });
+          }
+        } catch (parseError) {
+          console.error("Error parsing email match:", parseError);
+        }
+      }
+    }
+
+    return emailData;
+  } catch (error) {
+    console.error("Error getting account-specific emails:", error);
+    // Fallback to general method
+    return getUnreadMails(limit);
+  }
+}
+
 export default {
   getUnreadMails,
+  getUnreadMailsForAccount,
   searchMails,
   sendMail,
   getMailboxes,

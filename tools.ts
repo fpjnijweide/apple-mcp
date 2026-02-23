@@ -1,350 +1,451 @@
-/**
- * 🍎 Apple MCP Tools - Enhanced Edition
- * 
- * This enhanced version is based on the excellent work by the original supermemoryai/apple-mcp team:
- * - Original Repository: https://github.com/supermemoryai/apple-mcp
- * - Original Authors: @Dhravya, @jxnl, @calclavia, and the entire supermemory team
- * - Enhanced by: @Ayaanisthebest (https://github.com/Ayaanisthebest)
- * 
- * Enhanced Features:
- * - Improved tool descriptions with mandatory usage guidance
- * - Better contact integration requirements
- * - Enhanced notes tool with rich text support
- * - Streamlined messages tool operations
- * 
- * License: MIT (see LICENSE file)
- */
-
 import { type Tool } from "@modelcontextprotocol/sdk/types.js";
 
-const CONTACTS_TOOL: Tool = {
-    name: "contacts",
-    description: "Search, retrieve, edit, and delete contacts from Apple Contacts app. MANDATORY: Use this tool FIRST when user asks about messaging someone by name. This returns the real phone numbers needed for the messages tool.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: {
-          type: "string",
-          enum: ["search", "edit", "delete"],
-          description: "Operation to perform: 'search' to find contacts (default), 'edit' to update a contact's fields, 'delete' to remove a contact"
-        },
-        name: {
-          type: "string",
-          description: "Name to search for, edit, or delete. For search: partial name match. For edit/delete: must match exactly one contact."
-        },
-        birthday: {
-          type: "string",
-          description: "New birthday value for edit operation (e.g. '1996-02-24'). Pass empty string to clear."
-        },
-        phone: {
-          type: "string",
-          description: "Phone number to add for edit operation. Pass empty string to clear all phones."
-        },
-        email: {
-          type: "string",
-          description: "Email address to add for edit operation. Pass empty string to clear all emails."
-        },
-        newName: {
-          type: "string",
-          description: "New name for edit operation (to rename a contact)"
-        }
-      }
-    }
-  };
-  
-  const NOTES_TOOL: Tool = {
-    name: "notes", 
-    description: "Search, retrieve, and create notes in Apple Notes app. Search prioritizes note titles over content and returns full note content with rich text formatting. To update a note, create a new one with the same name. Supports tables, lists, headers, and all Apple Notes formatting.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: {
-          type: "string",
-          description: "Operation to perform: 'search', 'list', or 'create'",
-          enum: ["search", "list", "create"]
-        },
-        searchText: {
-          type: "string",
-          description: "Text to search for in notes (required for search operation)"
-        },
-        title: {
-          type: "string",
-          description: "Title of the note to create (required for create operation)"
-        },
-        body: {
-          type: "string",
-          description: "Content of the note to create (required for create operation). Supports rich text formatting including tables, lists, headers, and all Apple Notes features. Use markdown-style formatting or plain text."
-        },
-        folderName: {
-          type: "string",
-          description: "Name of the folder to create the note in (optional for create operation, defaults to 'Claude')"
-        }
-      },
-      required: ["operation"]
-    }
-  };
-  
-  const MESSAGES_TOOL: Tool = {
-    name: "messages",
-    description: "Interact with Apple Messages app - send, read, schedule messages. You can provide either a contact name or phone number. If you provide a name, the system will automatically look up their phone number.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: {
-          type: "string",
-          description: "Operation to perform: 'send', 'read', or 'schedule'",
-          enum: ["send", "read", "schedule"]
-        },
-        contactName: {
-          type: "string",
-          description: "Name of the contact (optional - if provided, phone number will be looked up automatically)"
-        },
-        phoneNumber: {
-          type: "string",
-          description: "Phone number (optional - if contactName is provided, this will be ignored and looked up automatically)"
-        },
-        message: {
-          type: "string",
-          description: "Message to send (required for send and schedule operations)"
-        },
-        limit: {
-          type: "number",
-          description: "Number of messages to read (optional, for read operations)"
-        },
-        scheduledTime: {
-          type: "string",
-          description: "ISO string of when to send the message (required for schedule operation)"
-        }
-      },
-      required: ["operation"]
-    }
-  };
-  
-  const MAIL_TOOL: Tool = {
-    name: "mail",
-    description: "Interact with Apple Mail app - read unread emails, search emails, and send emails",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: {
-          type: "string",
-          description: "Operation to perform: 'unread' (list unread emails with short previews), 'latest' (list recent emails with short previews), 'search' (find emails by keyword with short previews), 'open' (get the FULL content of one email - use subject from a previous list result), 'send', 'mailboxes', or 'accounts'.",
-          enum: ["unread", "search", "open", "send", "mailboxes", "accounts", "latest"]
-        },
-        account: {
-          type: "string",
-          description: "Email account to use (optional - if not provided, searches across all accounts)"
-        },
-        mailbox: {
-          type: "string",
-          description: "Mailbox to use (optional - if not provided, uses inbox or searches across all mailboxes)"
-        },
-        limit: {
-          type: "number",
-          description: "Number of emails to retrieve (optional, for unread, search, and latest operations)"
-        },
-        searchTerm: {
-          type: "string",
-          description: "General search across subject, sender, AND body content. Use for broad searches like a person's name. For precise filtering, use searchSender/searchSubject/searchContent instead."
-        },
-        searchSender: {
-          type: "string",
-          description: "Search by sender name or email address only (for search operation)"
-        },
-        searchSubject: {
-          type: "string",
-          description: "Search by subject line only (for search operation)"
-        },
-        searchContent: {
-          type: "string",
-          description: "Search by email body content only (for search operation)"
-        },
-        to: {
-          type: "string",
-          description: "Recipient email address (required for send operation)"
-        },
-        subject: {
-          type: "string",
-          description: "Email subject (required for send operation)"
-        },
-        body: {
-          type: "string",
-          description: "Email body content (required for send operation)"
-        },
-        cc: {
-          type: "string",
-          description: "CC email address (optional for send operation)"
-        },
-        bcc: {
-          type: "string",
-          description: "BCC email address (optional for send operation)"
-        }
-      },
-      required: ["operation"]
-    }
-  };
-  
-  const REMINDERS_TOOL: Tool = {
-    name: "reminders",
-    description: "Search, create, and open reminders in Apple Reminders app",
-    inputSchema: {
-      type: "object",
-      properties: {
-        operation: {
-          type: "string",
-          description: "Operation to perform: 'list', 'search', 'open', 'create', or 'listById'",
-          enum: ["list", "search", "open", "create", "listById"]
-        },
-        searchText: {
-          type: "string",
-          description: "Text to search for in reminders (required for search and open operations)"
-        },
-        name: {
-          type: "string",
-          description: "Name of the reminder to create (required for create operation)"
-        },
-        listName: {
-          type: "string",
-          description: "Name of the list to create the reminder in (optional for create operation)"
-        },
-        listId: {
-          type: "string",
-          description: "ID of the list to get reminders from (required for listById operation)"
-        },
-        props: {
-          type: "array",
-          items: {
-            type: "string"
-          },
-          description: "Properties to include in the reminders (optional for listById operation)"
-        },
-        notes: {
-          type: "string",
-          description: "Additional notes for the reminder (optional for create operation)"
-        },
-        dueDate: {
-          type: "string",
-          description: "Due date for the reminder in ISO format (optional for create operation)"
-        }
-      },
-      required: ["operation"]
-    }
-  };
-  
-  
-const CALENDAR_TOOL: Tool = {
-  name: "calendar",
-  description: "Search, create, and open calendar events in Apple Calendar app",
+// --- Contacts ---
+
+const CONTACTS_SEARCH: Tool = {
+  name: "contacts-search",
+  description: "Search contacts by name, or list all contacts if no name given. MANDATORY: Use this tool FIRST when user asks about messaging someone by name — returns real phone numbers needed for messages-send.",
   inputSchema: {
     type: "object",
     properties: {
-      operation: {
-        type: "string",
-        description: "Operation to perform: 'search', 'open', 'list', or 'create'",
-        enum: ["search", "open", "list", "create"]
-      },
-      searchText: {
-        type: "string",
-        description: "Text to search for in event titles, locations, and notes (required for search operation)"
-      },
-      eventId: {
-        type: "string",
-        description: "ID of the event to open (required for open operation)"
-      },
-      limit: {
-        type: "number",
-        description: "Number of events to retrieve (optional, default 10)"
-      },
-      fromDate: {
-        type: "string",
-        description: "Start date for search range in ISO format (optional, default is today)"
-      },
-      toDate: {
-        type: "string",
-        description: "End date for search range in ISO format (optional, default is 30 days from now for search, 7 days for list)"
-      },
-      title: {
-        type: "string",
-        description: "Title of the event to create (required for create operation)"
-      },
-      startDate: {
-        type: "string",
-        description: "Start date/time of the event in ISO format (required for create operation)"
-      },
-      endDate: {
-        type: "string",
-        description: "End date/time of the event in ISO format (required for create operation)"
-      },
-      location: {
-        type: "string",
-        description: "Location of the event (optional for create operation)"
-      },
-      notes: {
-        type: "string",
-        description: "Additional notes for the event (optional for create operation)"
-      },
-      isAllDay: {
-        type: "boolean",
-        description: "Whether the event is an all-day event (optional for create operation, default is false)"
-      },
-      calendarName: {
-        type: "string",
-        description: "Name of the calendar to create the event in (optional for create operation, uses default calendar if not specified)"
-      }
-    },
-    required: ["operation"]
-  }
-};
-  
-const MAPS_TOOL: Tool = {
-  name: "maps",
-  description: "Search locations, manage guides, save favorites, and get directions using Apple Maps",
-  inputSchema: {
-    type: "object",
-    properties: {
-      operation: {
-        type: "string",
-        description: "Operation to perform with Maps",
-        enum: ["search", "save", "directions", "pin", "listGuides", "addToGuide", "createGuide"]
-      },
-      query: {
-        type: "string",
-        description: "Search query for locations (required for search)"
-      },
-      limit: {
-        type: "number",
-        description: "Maximum number of results to return (optional for search)"
-      },
       name: {
         type: "string",
-        description: "Name of the location (required for save and pin)"
-      },
-      address: {
-        type: "string",
-        description: "Address of the location (required for save, pin, addToGuide)"
-      },
-      fromAddress: {
-        type: "string",
-        description: "Starting address for directions (required for directions)"
-      },
-      toAddress: {
-        type: "string",
-        description: "Destination address for directions (required for directions)"
-      },
-      transportType: {
-        type: "string",
-        description: "Type of transport to use (optional for directions)",
-        enum: ["driving", "walking", "transit"]
-      },
-      guideName: {
-        type: "string",
-        description: "Name of the guide (required for createGuide and addToGuide)"
+        description: "Name to search for (partial match). Omit to list all contacts."
       }
-    },
-    required: ["operation"]
+    }
   }
 };
 
-const tools = [CONTACTS_TOOL, NOTES_TOOL, MESSAGES_TOOL, MAIL_TOOL, REMINDERS_TOOL, CALENDAR_TOOL, MAPS_TOOL];
+const CONTACTS_EDIT: Tool = {
+  name: "contacts-edit",
+  description: "Update a contact's fields (birthday, phone, email, name). Must match exactly one contact.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Name of the contact to edit (must match exactly one)" },
+      birthday: { type: "string", description: "New birthday (e.g. '1996-02-24'). Pass empty string to clear." },
+      phone: { type: "string", description: "Phone number to add. Pass empty string to clear all." },
+      email: { type: "string", description: "Email to add. Pass empty string to clear all." },
+      newName: { type: "string", description: "New name (to rename the contact)" }
+    },
+    required: ["name"]
+  }
+};
+
+const CONTACTS_DELETE: Tool = {
+  name: "contacts-delete",
+  description: "Delete a contact by name. Must match exactly one contact.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Name of the contact to delete (must match exactly one)" }
+    },
+    required: ["name"]
+  }
+};
+
+// --- Notes ---
+
+const NOTES_SEARCH: Tool = {
+  name: "notes-search",
+  description: "Search notes by text. Prioritizes title matches over content matches. Returns full note content with rich text formatting.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      searchText: { type: "string", description: "Text to search for in notes" }
+    },
+    required: ["searchText"]
+  }
+};
+
+const NOTES_LIST: Tool = {
+  name: "notes-list",
+  description: "List all notes with their full content.",
+  inputSchema: {
+    type: "object",
+    properties: {}
+  }
+};
+
+const NOTES_CREATE: Tool = {
+  name: "notes-create",
+  description: "Create a new note in Apple Notes. To update a note, create a new one with the same name. Supports tables, lists, headers, and all Apple Notes formatting.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Title of the note" },
+      body: { type: "string", description: "Content of the note. Supports rich text formatting including tables, lists, headers." },
+      folderName: { type: "string", description: "Folder to create the note in (default: 'Claude')" }
+    },
+    required: ["title", "body"]
+  }
+};
+
+// --- Messages ---
+
+const MESSAGES_READ: Tool = {
+  name: "messages-read",
+  description: "Read messages from a contact. Provide either contactName or phoneNumber.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      contactName: { type: "string", description: "Name of the contact (phone number will be looked up)" },
+      phoneNumber: { type: "string", description: "Phone number (ignored if contactName provided)" },
+      limit: { type: "number", description: "Number of messages to read" }
+    }
+  }
+};
+
+const MESSAGES_SEND: Tool = {
+  name: "messages-send",
+  description: "Send a message to a contact. Provide either contactName or phoneNumber.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      contactName: { type: "string", description: "Name of the contact" },
+      phoneNumber: { type: "string", description: "Phone number" },
+      message: { type: "string", description: "Message to send" }
+    },
+    required: ["message"]
+  }
+};
+
+const MESSAGES_SCHEDULE: Tool = {
+  name: "messages-schedule",
+  description: "Schedule a message to be sent later. Provide either contactName or phoneNumber.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      contactName: { type: "string", description: "Name of the contact" },
+      phoneNumber: { type: "string", description: "Phone number" },
+      message: { type: "string", description: "Message to send" },
+      scheduledTime: { type: "string", description: "ISO string of when to send the message" }
+    },
+    required: ["message", "scheduledTime"]
+  }
+};
+
+// --- Mail ---
+
+const MAIL_UNREAD: Tool = {
+  name: "mail-unread",
+  description: "List unread emails with short previews. Optionally filter by account and/or mailbox.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      account: { type: "string", description: "Email account to filter by" },
+      mailbox: { type: "string", description: "Mailbox to filter by" },
+      limit: { type: "number", description: "Number of emails to retrieve (default 10)" }
+    }
+  }
+};
+
+const MAIL_SEARCH: Tool = {
+  name: "mail-search",
+  description: "Search emails by keyword with short previews. Use searchTerm for broad searches, or searchSender/searchSubject/searchContent for precise filtering.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      searchTerm: { type: "string", description: "General search across subject, sender, AND body content" },
+      searchSender: { type: "string", description: "Search by sender name or email address only" },
+      searchSubject: { type: "string", description: "Search by subject line only" },
+      searchContent: { type: "string", description: "Search by email body content only" },
+      account: { type: "string", description: "Email account to filter by" },
+      mailbox: { type: "string", description: "Mailbox to filter by" },
+      limit: { type: "number", description: "Number of emails to retrieve" }
+    }
+  }
+};
+
+const MAIL_OPEN: Tool = {
+  name: "mail-open",
+  description: "Get the FULL content of one email. Use subject from a previous list/search result.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      subject: { type: "string", description: "Subject of the email to open (from a previous search/unread/latest result)" },
+      searchTerm: { type: "string", description: "Additional search term to narrow results" },
+      mailbox: { type: "string", description: "Mailbox to search in" }
+    },
+    required: ["subject"]
+  }
+};
+
+const MAIL_LATEST: Tool = {
+  name: "mail-latest",
+  description: "List recent emails with short previews, regardless of read status.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      account: { type: "string", description: "Email account to filter by" },
+      limit: { type: "number", description: "Number of emails to retrieve (default 5)" }
+    }
+  }
+};
+
+const MAIL_MAILBOXES: Tool = {
+  name: "mail-mailboxes",
+  description: "List mailboxes. Optionally filter by account.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      account: { type: "string", description: "Account to list mailboxes for" }
+    }
+  }
+};
+
+const MAIL_ACCOUNTS: Tool = {
+  name: "mail-accounts",
+  description: "List all email accounts configured in Mail.",
+  inputSchema: {
+    type: "object",
+    properties: {}
+  }
+};
+
+const MAIL_SEND: Tool = {
+  name: "mail-send",
+  description: "Send an email.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      to: { type: "string", description: "Recipient email address" },
+      subject: { type: "string", description: "Email subject" },
+      body: { type: "string", description: "Email body content" },
+      cc: { type: "string", description: "CC email address" },
+      bcc: { type: "string", description: "BCC email address" }
+    },
+    required: ["to", "subject", "body"]
+  }
+};
+
+// --- Reminders ---
+
+const REMINDERS_LIST: Tool = {
+  name: "reminders-list",
+  description: "List all reminder lists and reminders.",
+  inputSchema: {
+    type: "object",
+    properties: {}
+  }
+};
+
+const REMINDERS_SEARCH: Tool = {
+  name: "reminders-search",
+  description: "Search for reminders by text.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      searchText: { type: "string", description: "Text to search for in reminders" }
+    },
+    required: ["searchText"]
+  }
+};
+
+const REMINDERS_LIST_BY_ID: Tool = {
+  name: "reminders-list-by-id",
+  description: "Get reminders from a specific list by its ID.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      listId: { type: "string", description: "ID of the list to get reminders from" },
+      props: { type: "array", items: { type: "string" }, description: "Properties to include" }
+    },
+    required: ["listId"]
+  }
+};
+
+const REMINDERS_OPEN: Tool = {
+  name: "reminders-open",
+  description: "Open a reminder in the Reminders app.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      searchText: { type: "string", description: "Text to search for to find the reminder" }
+    },
+    required: ["searchText"]
+  }
+};
+
+const REMINDERS_CREATE: Tool = {
+  name: "reminders-create",
+  description: "Create a new reminder.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Name of the reminder" },
+      listName: { type: "string", description: "List to create the reminder in" },
+      notes: { type: "string", description: "Additional notes" },
+      dueDate: { type: "string", description: "Due date in ISO format" }
+    },
+    required: ["name"]
+  }
+};
+
+// --- Calendar ---
+
+const CALENDAR_LIST: Tool = {
+  name: "calendar-list",
+  description: "List upcoming calendar events.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      limit: { type: "number", description: "Number of events (default 10)" },
+      fromDate: { type: "string", description: "Start date in ISO format (default today)" },
+      toDate: { type: "string", description: "End date in ISO format (default 7 days from now)" }
+    }
+  }
+};
+
+const CALENDAR_SEARCH: Tool = {
+  name: "calendar-search",
+  description: "Search calendar events by text in titles, locations, and notes.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      searchText: { type: "string", description: "Text to search for" },
+      limit: { type: "number", description: "Number of events (default 10)" },
+      fromDate: { type: "string", description: "Start of search range in ISO format (default today)" },
+      toDate: { type: "string", description: "End of search range in ISO format (default 30 days from now)" }
+    },
+    required: ["searchText"]
+  }
+};
+
+const CALENDAR_OPEN: Tool = {
+  name: "calendar-open",
+  description: "Open a calendar event by its ID.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      eventId: { type: "string", description: "ID of the event to open" }
+    },
+    required: ["eventId"]
+  }
+};
+
+const CALENDAR_CREATE: Tool = {
+  name: "calendar-create",
+  description: "Create a new calendar event.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Title of the event" },
+      startDate: { type: "string", description: "Start date/time in ISO format" },
+      endDate: { type: "string", description: "End date/time in ISO format" },
+      location: { type: "string", description: "Location" },
+      notes: { type: "string", description: "Additional notes" },
+      isAllDay: { type: "boolean", description: "Whether it's an all-day event (default false)" },
+      calendarName: { type: "string", description: "Calendar to create in (uses default if not specified)" }
+    },
+    required: ["title", "startDate", "endDate"]
+  }
+};
+
+// --- Maps ---
+
+const MAPS_SEARCH: Tool = {
+  name: "maps-search",
+  description: "Search for locations in Apple Maps.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Search query" },
+      limit: { type: "number", description: "Maximum results" }
+    },
+    required: ["query"]
+  }
+};
+
+const MAPS_DIRECTIONS: Tool = {
+  name: "maps-directions",
+  description: "Get directions between two locations.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      fromAddress: { type: "string", description: "Starting address" },
+      toAddress: { type: "string", description: "Destination address" },
+      transportType: { type: "string", enum: ["driving", "walking", "transit"], description: "Transport type" }
+    },
+    required: ["fromAddress", "toAddress"]
+  }
+};
+
+const MAPS_LIST_GUIDES: Tool = {
+  name: "maps-list-guides",
+  description: "List all guides in Apple Maps.",
+  inputSchema: {
+    type: "object",
+    properties: {}
+  }
+};
+
+const MAPS_SAVE: Tool = {
+  name: "maps-save",
+  description: "Save a location as a favorite in Apple Maps.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Name of the location" },
+      address: { type: "string", description: "Address of the location" }
+    },
+    required: ["name", "address"]
+  }
+};
+
+const MAPS_PIN: Tool = {
+  name: "maps-pin",
+  description: "Drop a pin at a location in Apple Maps.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Name of the location" },
+      address: { type: "string", description: "Address of the location" }
+    },
+    required: ["name", "address"]
+  }
+};
+
+const MAPS_ADD_TO_GUIDE: Tool = {
+  name: "maps-add-to-guide",
+  description: "Add a location to an existing guide in Apple Maps.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      address: { type: "string", description: "Address of the location" },
+      guideName: { type: "string", description: "Name of the guide" }
+    },
+    required: ["address", "guideName"]
+  }
+};
+
+const MAPS_CREATE_GUIDE: Tool = {
+  name: "maps-create-guide",
+  description: "Create a new guide in Apple Maps.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      guideName: { type: "string", description: "Name of the guide" }
+    },
+    required: ["guideName"]
+  }
+};
+
+const tools = [
+  // Contacts
+  CONTACTS_SEARCH, CONTACTS_EDIT, CONTACTS_DELETE,
+  // Notes
+  NOTES_SEARCH, NOTES_LIST, NOTES_CREATE,
+  // Messages
+  MESSAGES_READ, MESSAGES_SEND, MESSAGES_SCHEDULE,
+  // Mail
+  MAIL_UNREAD, MAIL_SEARCH, MAIL_OPEN, MAIL_LATEST, MAIL_MAILBOXES, MAIL_ACCOUNTS, MAIL_SEND,
+  // Reminders
+  REMINDERS_LIST, REMINDERS_SEARCH, REMINDERS_LIST_BY_ID, REMINDERS_OPEN, REMINDERS_CREATE,
+  // Calendar
+  CALENDAR_LIST, CALENDAR_SEARCH, CALENDAR_OPEN, CALENDAR_CREATE,
+  // Maps
+  MAPS_SEARCH, MAPS_DIRECTIONS, MAPS_LIST_GUIDES, MAPS_SAVE, MAPS_PIN, MAPS_ADD_TO_GUIDE, MAPS_CREATE_GUIDE,
+];
 
 export default tools;

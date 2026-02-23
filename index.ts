@@ -1,36 +1,12 @@
 #!/usr/bin/env node
-/**
- * 🍎 Apple MCP Server - Enhanced Edition
- * 
- * This enhanced version is based on the excellent work by the original supermemoryai/apple-mcp team:
- * - Original Repository: https://github.com/supermemoryai/apple-mcp
- * - Original Authors: @Dhravya, @jxnl, @calclavia, and the entire supermemory team
- * - Enhanced by: @Ayaanisthebest (https://github.com/Ayaanisthebest)
- * 
- * Enhanced Features:
- * - Smart contact resolution in messages tool
- * - Priority-based notes search with rich text support
- * - Improved error handling and validation
- * - Enhanced developer experience with debug logging
- * - Better TypeScript interfaces and code organization
- * 
- * Original Features:
- * - Full Apple ecosystem integration (Calendar, Contacts, Mail, Maps, Messages, Notes, Reminders)
- * - Comprehensive testing suite
- * - Professional documentation and examples
- * 
- * License: MIT (see LICENSE file)
- */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
-	CallToolRequestSchema,
-	ListToolsRequestSchema,
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { runAppleScript } from "run-applescript";
 import tools from "./tools";
-
 
 // Safe mode implementation - lazy loading of modules
 let useEagerLoading = true;
@@ -45,1807 +21,777 @@ let notes: typeof import("./utils/notes").default | null = null;
 let message: typeof import("./utils/message").default | null = null;
 let mail: typeof import("./utils/mail").default | null = null;
 let reminders: typeof import("./utils/reminders").default | null = null;
-
 let calendar: typeof import("./utils/calendar").default | null = null;
 let maps: typeof import("./utils/maps").default | null = null;
 
 // Type map for module names to their types
 type ModuleMap = {
-	contacts: typeof import("./utils/contacts").default;
-	notes: typeof import("./utils/notes").default;
-	message: typeof import("./utils/message").default;
-	mail: typeof import("./utils/mail").default;
-	reminders: typeof import("./utils/reminders").default;
-	calendar: typeof import("./utils/calendar").default;
-	maps: typeof import("./utils/maps").default;
+  contacts: typeof import("./utils/contacts").default;
+  notes: typeof import("./utils/notes").default;
+  message: typeof import("./utils/message").default;
+  mail: typeof import("./utils/mail").default;
+  reminders: typeof import("./utils/reminders").default;
+  calendar: typeof import("./utils/calendar").default;
+  maps: typeof import("./utils/maps").default;
 };
 
 // Helper function for lazy module loading
 async function loadModule<
-	T extends
-		| "contacts"
-		| "notes"
-		| "message"
-		| "mail"
-		| "reminders"
-		| "calendar"
-		| "maps",
+  T extends
+    | "contacts"
+    | "notes"
+    | "message"
+    | "mail"
+    | "reminders"
+    | "calendar"
+    | "maps",
 >(moduleName: T): Promise<ModuleMap[T]> {
-	if (safeModeFallback) {
-		console.error(`Loading ${moduleName} module on demand (safe mode)...`);
-	}
+  if (safeModeFallback) {
+    console.error(`Loading ${moduleName} module on demand (safe mode)...`);
+  }
 
-	try {
-		switch (moduleName) {
-			case "contacts":
-				if (!contacts) contacts = (await import("./utils/contacts")).default;
-				return contacts as ModuleMap[T];
-			case "notes":
-				if (!notes) notes = (await import("./utils/notes")).default;
-				return notes as ModuleMap[T];
-			case "message":
-				if (!message) message = (await import("./utils/message")).default;
-				return message as ModuleMap[T];
-			case "mail":
-				if (!mail) mail = (await import("./utils/mail")).default;
-				return mail as ModuleMap[T];
-			case "reminders":
-				if (!reminders) reminders = (await import("./utils/reminders")).default;
-				return reminders as ModuleMap[T];
-			case "calendar":
-				if (!calendar) calendar = (await import("./utils/calendar")).default;
-				return calendar as ModuleMap[T];
-			case "maps":
-				if (!maps) maps = (await import("./utils/maps")).default;
-				return maps as ModuleMap[T];
-			default:
-				throw new Error(`Unknown module: ${moduleName}`);
-		}
-	} catch (e) {
-		console.error(`Error loading module ${moduleName}:`, e);
-		throw e;
-	}
+  try {
+    switch (moduleName) {
+      case "contacts":
+        if (!contacts) contacts = (await import("./utils/contacts")).default;
+        return contacts as ModuleMap[T];
+      case "notes":
+        if (!notes) notes = (await import("./utils/notes")).default;
+        return notes as ModuleMap[T];
+      case "message":
+        if (!message) message = (await import("./utils/message")).default;
+        return message as ModuleMap[T];
+      case "mail":
+        if (!mail) mail = (await import("./utils/mail")).default;
+        return mail as ModuleMap[T];
+      case "reminders":
+        if (!reminders) reminders = (await import("./utils/reminders")).default;
+        return reminders as ModuleMap[T];
+      case "calendar":
+        if (!calendar) calendar = (await import("./utils/calendar")).default;
+        return calendar as ModuleMap[T];
+      case "maps":
+        if (!maps) maps = (await import("./utils/maps")).default;
+        return maps as ModuleMap[T];
+      default:
+        throw new Error(`Unknown module: ${moduleName}`);
+    }
+  } catch (e) {
+    console.error(`Error loading module ${moduleName}:`, e);
+    throw e;
+  }
 }
 
 // Set a timeout to switch to safe mode if initialization takes too long
 loadingTimeout = setTimeout(() => {
-	console.error(
-		"Loading timeout reached. Switching to safe mode (lazy loading...)",
-	);
-	useEagerLoading = false;
-	safeModeFallback = true;
+  console.error(
+    "Loading timeout reached. Switching to safe mode (lazy loading...)",
+  );
+  useEagerLoading = false;
+  safeModeFallback = true;
 
-	// Clear the references to any modules that might be in a bad state
-	contacts = null;
-	notes = null;
-	message = null;
-	mail = null;
-	reminders = null;
-	calendar = null;
+  contacts = null;
+  notes = null;
+  message = null;
+  mail = null;
+  reminders = null;
+  calendar = null;
 
-	// Proceed with server setup
-	initServer();
-}, 5000); // 5 second timeout
+  initServer();
+}, 5000);
 
 // Eager loading attempt
 async function attemptEagerLoading() {
-	try {
-		console.error("Attempting to eagerly load modules...");
+  try {
+    console.error("Attempting to eagerly load modules...");
 
-		// Try to import all modules
-		contacts = (await import("./utils/contacts")).default;
-		console.error("- Contacts module loaded successfully");
+    contacts = (await import("./utils/contacts")).default;
+    console.error("- Contacts module loaded successfully");
 
-		notes = (await import("./utils/notes")).default;
-		console.error("- Notes module loaded successfully");
+    notes = (await import("./utils/notes")).default;
+    console.error("- Notes module loaded successfully");
 
-		message = (await import("./utils/message")).default;
-		console.error("- Message module loaded successfully");
+    message = (await import("./utils/message")).default;
+    console.error("- Message module loaded successfully");
 
-		mail = (await import("./utils/mail")).default;
-		console.error("- Mail module loaded successfully");
+    mail = (await import("./utils/mail")).default;
+    console.error("- Mail module loaded successfully");
 
-		reminders = (await import("./utils/reminders")).default;
-		console.error("- Reminders module loaded successfully");
+    reminders = (await import("./utils/reminders")).default;
+    console.error("- Reminders module loaded successfully");
 
+    calendar = (await import("./utils/calendar")).default;
+    console.error("- Calendar module loaded successfully");
 
-		calendar = (await import("./utils/calendar")).default;
-		console.error("- Calendar module loaded successfully");
+    maps = (await import("./utils/maps")).default;
+    console.error("- Maps module loaded successfully");
 
-		maps = (await import("./utils/maps")).default;
-		console.error("- Maps module loaded successfully");
+    if (loadingTimeout) {
+      clearTimeout(loadingTimeout);
+      loadingTimeout = null;
+    }
 
-		// If we get here, clear the timeout and proceed with eager loading
-		if (loadingTimeout) {
-			clearTimeout(loadingTimeout);
-			loadingTimeout = null;
-		}
+    console.error("All modules loaded successfully, using eager loading mode");
+    initServer();
+  } catch (error) {
+    console.error("Error during eager loading:", error);
+    console.error("Switching to safe mode (lazy loading)...");
 
-		console.error("All modules loaded successfully, using eager loading mode");
-		initServer();
-	} catch (error) {
-		console.error("Error during eager loading:", error);
-		console.error("Switching to safe mode (lazy loading)...");
+    if (loadingTimeout) {
+      clearTimeout(loadingTimeout);
+      loadingTimeout = null;
+    }
 
-		// Clear any timeout if it exists
-		if (loadingTimeout) {
-			clearTimeout(loadingTimeout);
-			loadingTimeout = null;
-		}
+    useEagerLoading = false;
+    safeModeFallback = true;
 
-		// Switch to safe mode
-		useEagerLoading = false;
-		safeModeFallback = true;
+    contacts = null;
+    notes = null;
+    message = null;
+    mail = null;
+    reminders = null;
+    calendar = null;
+    maps = null;
 
-		// Clear the references to any modules that might be in a bad state
-		contacts = null;
-		notes = null;
-		message = null;
-		mail = null;
-		reminders = null;
-			calendar = null;
-		maps = null;
-
-		// Initialize the server in safe mode
-		initServer();
-	}
+    initServer();
+  }
 }
 
-// Attempt eager loading first
 attemptEagerLoading();
 
-// Main server object
+// --- Helpers ---
+
+function errorResult(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+function successResult(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: false };
+}
+
+async function resolvePhoneNumber(
+  args: { contactName?: string; phoneNumber?: string },
+): Promise<string> {
+  if (args.phoneNumber) return args.phoneNumber;
+  if (!args.contactName) {
+    throw new Error("No phone number or contact name provided");
+  }
+  const contactsModule = await loadModule("contacts");
+  const numbers = await contactsModule.findNumber(args.contactName);
+  if (numbers.length === 0) {
+    throw new Error(`Contact not found: "${args.contactName}"`);
+  }
+  const phoneStr = numbers[0];
+  const phoneNumbers = phoneStr.split(", ").map((p: string) => p.trim());
+  return phoneNumbers.find((p: string) => p.startsWith("+")) || phoneNumbers[0];
+}
+
+// --- Server ---
+
 let server: Server;
 
-// Initialize the server and set up handlers
 function initServer() {
-	console.error(
-		`Initializing server in ${safeModeFallback ? "safe" : "standard"} mode...`,
-	);
-
-	server = new Server(
-		{
-			name: "Apple MCP tools",
-			version: "1.0.0",
-		},
-		{
-			capabilities: {
-				tools: {},
-			},
-		},
-	);
-
-	server.setRequestHandler(ListToolsRequestSchema, async () => {
-		console.error("DEBUG: Available tools:", tools.map(t => t.name));
-		return { tools };
-	});
-
-	server.setRequestHandler(CallToolRequestSchema, async (request) => {
-		try {
-			const { name, arguments: args } = request.params;
-
-			if (!args) {
-				throw new Error("No arguments provided");
-			}
-
-			switch (name) {
-				case "contacts": {
-					if (!isContactsArgs(args)) {
-						throw new Error("Invalid arguments for contacts tool");
-					}
-
-					try {
-						const contactsModule = await loadModule("contacts");
-
-						if (args.operation === "delete") {
-							if (!args.name) {
-								return {
-									content: [{ type: "text", text: "Name is required for delete operation." }],
-									isError: true,
-								};
-							}
-							const result = await contactsModule.deleteContact(args.name);
-							return {
-								content: [{ type: "text", text: result.message }],
-								isError: !result.success,
-							};
-						}
-
-						if (args.operation === "edit") {
-							if (!args.name) {
-								return {
-									content: [{ type: "text", text: "Name is required for edit operation." }],
-									isError: true,
-								};
-							}
-							const updates: Record<string, string | null> = {};
-							if ("birthday" in args) updates.birthday = args.birthday === "" ? null : args.birthday;
-							if ("phone" in args) updates.phone = args.phone === "" ? null : args.phone;
-							if ("email" in args) updates.email = args.email === "" ? null : args.email;
-							if ("newName" in args) updates.newName = args.newName;
-							const result = await contactsModule.editContact(args.name, updates);
-							return {
-								content: [{ type: "text", text: result.message }],
-								isError: !result.success,
-							};
-						}
-
-						if (args.name) {
-							const contacts = await contactsModule.findContacts(args.name);
-							if (contacts.length === 0) {
-								return {
-									content: [
-										{
-											type: "text",
-											text: `No contact found for "${args.name}". Try a different name or use no name parameter to list all contacts.`,
-										},
-									],
-									isError: false,
-								};
-							}
-							const formatted = contacts.map((c: any) => {
-								const parts = [c.name];
-								if (c.phones.length > 0) parts.push(`Phone: ${c.phones.join(", ")}`);
-								if (c.emails.length > 0) parts.push(`Email: ${c.emails.join(", ")}`);
-								if (c.birthday) parts.push(`Birthday: ${c.birthday}`);
-								return parts.join("\n");
-							});
-							return {
-								content: [
-									{
-										type: "text",
-										text: `Found ${contacts.length} contact${contacts.length > 1 ? "s" : ""} matching "${args.name}":\n\n${formatted.join("\n\n")}`,
-									},
-								],
-								isError: false,
-							};
-						} else {
-							const allNumbers = await contactsModule.getAllNumbers();
-							const contactCount = Object.keys(allNumbers).length;
-
-							if (contactCount === 0) {
-								return {
-									content: [
-										{
-											type: "text",
-											text: "No contacts found in the address book. Please make sure you have granted access to Contacts.",
-										},
-									],
-									isError: false,
-								};
-							}
-
-							const formattedContacts = Object.entries(allNumbers)
-								.filter(([_, phones]: [string, any]) => phones.length > 0)
-								.map(([name, phones]: [string, any]) => `${name}: ${phones.join(", ")}`);
-
-							return {
-								content: [
-									{
-										type: "text",
-										text:
-											formattedContacts.length > 0
-												? `Found ${contactCount} contacts:\n\n${formattedContacts.join("\n")}`
-												: "Found contacts but none have phone numbers. Try searching by name to see more details.",
-									},
-								],
-								isError: false,
-							};
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error accessing contacts: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-				case "notes": {
-					if (!isNotesArgs(args)) {
-						throw new Error("Invalid arguments for notes tool");
-					}
-
-					try {
-						const notesModule = await loadModule("notes");
-						const { operation } = args;
-
-						switch (operation) {
-							case "search": {
-								if (!args.searchText) {
-									throw new Error(
-										"Search text is required for search operation",
-									);
-								}
-
-								const foundNotes = await notesModule.findNote(args.searchText);
-								return {
-									content: [
-										{
-											type: "text",
-											text: foundNotes.length
-												? foundNotes
-														.map((note) => {
-															const priority = note.priority === "title" ? "🎯 TITLE MATCH" : "📝 CONTENT MATCH";
-															return `${priority}\n${note.name}:\n${note.content}`;
-														})
-														.join("\n\n")
-												: `No notes found for "${args.searchText}"`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "list": {
-								const allNotes = await notesModule.getAllNotes();
-								return {
-									content: [
-										{
-											type: "text",
-											text: allNotes.length
-												? allNotes
-														.map((note) => `${note.name}:\n${note.content}`)
-														.join("\n\n")
-												: "No notes exist.",
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "create": {
-								console.error("DEBUG: Create case reached with args:", args);
-								
-								if (!args.title || !args.body) {
-									throw new Error(
-										"Title and body are required for create operation",
-									);
-								}
-
-								console.error("DEBUG: Calling createNote with:", args.title, args.body, args.folderName);
-								
-								const result = await notesModule.createNote(
-									args.title,
-									args.body,
-									args.folderName,
-								);
-
-								console.error("DEBUG: createNote result:", result);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.success
-												? `Created note "${args.title}" in folder "${result.folderName}"${result.usedDefaultFolder ? " (created new folder)" : ""}.`
-												: `Failed to create note: ${result.message}`,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-
-
-							default:
-								throw new Error(`Unknown operation: ${operation}`);
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error accessing notes: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-				case "messages": {
-					if (!isMessagesArgs(args)) {
-						throw new Error("Invalid arguments for messages tool");
-					}
-
-					// Auto-resolve contact name to phone number if provided
-					let resolvedPhoneNumber = args.phoneNumber;
-					
-					if (args.contactName && !args.phoneNumber) {
-						try {
-							console.error(`DEBUG: Looking up contact name: ${args.contactName}`);
-							const contactsModule = await loadModule("contacts");
-							const numbers = await contactsModule.findNumber(args.contactName);
-							
-							if (numbers.length === 0) {
-								return {
-									content: [
-										{
-											type: "text",
-											text: `❌ Contact not found: "${args.contactName}". Please check the spelling or try a different name.`,
-										},
-									],
-									isError: true,
-								};
-							}
-							
-							// Parse phone numbers and prefer +1 format
-							const phoneStr = numbers[0];
-							const phoneNumbers = phoneStr.split(', ').map(p => p.trim());
-							// Prefer +1 format, otherwise use first available
-							resolvedPhoneNumber = phoneNumbers.find(p => p.startsWith('+')) || phoneNumbers[0];
-							console.error(`DEBUG: Resolved contact "${args.contactName}" to phone number: ${resolvedPhoneNumber}`);
-						} catch (error) {
-							return {
-								content: [
-									{
-										type: "text",
-										text: `❌ Error looking up contact "${args.contactName}": ${error instanceof Error ? error.message : String(error)}`,
-									},
-								],
-								isError: true,
-							};
-						}
-					}
-					
-					// Validate we have a phone number
-					if (!resolvedPhoneNumber) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `❌ No phone number provided. Please provide either a contactName or phoneNumber.`,
-								},
-							],
-							isError: true,
-						};
-					}
-
-					try {
-						const messageModule = await loadModule("message");
-
-						switch (args.operation) {
-							case "send": {
-								if (!args.message) {
-									throw new Error(
-										"Message is required for send operation",
-									);
-								}
-								await messageModule.sendMessage(resolvedPhoneNumber, args.message);
-								return {
-									content: [
-										{
-											type: "text",
-											text: `Message sent to ${resolvedPhoneNumber}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "open": {
-								const messages = await messageModule.readMessages(
-									resolvedPhoneNumber,
-									args.limit,
-								);
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												messages.length > 0
-													? messages
-															.map(
-																(msg) =>
-																	`[${new Date(msg.date).toLocaleString()}] ${msg.is_from_me ? "Me" : msg.sender}: ${msg.content}`,
-															)
-															.join("\n")
-													: "No messages found",
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "schedule": {
-								if (!args.message || !args.scheduledTime) {
-									throw new Error(
-										"Message and scheduled time are required for schedule operation",
-									);
-								}
-								const scheduledMsg = await messageModule.scheduleMessage(
-									resolvedPhoneNumber,
-									args.message,
-									new Date(args.scheduledTime),
-								);
-								return {
-									content: [
-										{
-											type: "text",
-											text: `Message scheduled to be sent to ${resolvedPhoneNumber} at ${scheduledMsg.scheduledTime}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-
-
-							default:
-								throw new Error(`Unknown operation: ${args.operation}`);
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error with messages operation: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-				case "mail": {
-					if (!isMailArgs(args)) {
-						throw new Error("Invalid arguments for mail tool");
-					}
-
-					try {
-						const mailModule = await loadModule("mail");
-
-						switch (args.operation) {
-							case "unread": {
-								// If an account is specified, we'll try to search specifically in that account
-								let emails;
-								if (args.account) {
-									console.error(
-										`Getting unread emails for account: ${args.account}`,
-									);
-									// Use AppleScript to get unread emails from specific account
-									const script = `
-tell application "Mail"
-    set resultList to {}
-    try
-        set targetAccount to first account whose name is "${args.account.replace(/"/g, '\\"')}"
-
-        -- Get mailboxes for this account
-        set acctMailboxes to every mailbox of targetAccount
-
-        -- If mailbox is specified, only search in that mailbox
-        set mailboxesToSearch to acctMailboxes
-        ${
-					args.mailbox
-						? `
-        set mailboxesToSearch to {}
-        repeat with mb in acctMailboxes
-            if name of mb is "${args.mailbox.replace(/"/g, '\\"')}" then
-                set mailboxesToSearch to {mb}
-                exit repeat
-            end if
-        end repeat
-        `
-						: ""
-				}
-
-        -- Search specified mailboxes
-        repeat with mb in mailboxesToSearch
-            try
-                set unreadMessages to (messages of mb whose read status is false)
-                if (count of unreadMessages) > 0 then
-                    set msgLimit to ${args.limit || 10}
-                    if (count of unreadMessages) < msgLimit then
-                        set msgLimit to (count of unreadMessages)
-                    end if
-
-                    repeat with i from 1 to msgLimit
-                        try
-                            set currentMsg to item i of unreadMessages
-                            set msgData to {subject:(subject of currentMsg), sender:(sender of currentMsg), ¬
-                                        date:(date sent of currentMsg) as string, mailbox:(name of mb)}
-
-                            -- Try to get content if possible
-                            try
-                                set msgContent to content of currentMsg
-                                if length of msgContent > 500 then
-                                    set msgContent to (text 1 thru 500 of msgContent) & "..."
-                                end if
-                                set msgData to msgData & {content:msgContent}
-                            on error
-                                set msgData to msgData & {content:"[Content not available]"}
-                            end try
-
-                            set end of resultList to msgData
-                        on error
-                            -- Skip problematic messages
-                        end try
-                    end repeat
-
-                    if (count of resultList) ≥ ${args.limit || 10} then exit repeat
-                end if
-            on error
-                -- Skip problematic mailboxes
-            end try
-        end repeat
-    on error errMsg
-        return "Error: " & errMsg
-    end try
-
-    return resultList
-end tell`;
-
-									try {
-										const asResult = await runAppleScript(script);
-										if (asResult && asResult.startsWith("Error:")) {
-											throw new Error(asResult);
-										}
-
-										// Parse the results - similar to general getUnreadMails
-										const emailData = [];
-										const matches = asResult.match(/\{([^}]+)\}/g);
-										if (matches && matches.length > 0) {
-											for (const match of matches) {
-												try {
-													const props = match
-														.substring(1, match.length - 1)
-														.split(",");
-													const email: any = {};
-
-													props.forEach((prop) => {
-														const parts = prop.split(":");
-														if (parts.length >= 2) {
-															const key = parts[0].trim();
-															const value = parts.slice(1).join(":").trim();
-															email[key] = value;
-														}
-													});
-
-													if (email.subject || email.sender) {
-														emailData.push({
-															subject: email.subject || "No subject",
-															sender: email.sender || "Unknown sender",
-															dateSent: email.date || new Date().toString(),
-															content:
-																email.content || "[Content not available]",
-															isRead: false,
-															mailbox: `${args.account} - ${email.mailbox || "Unknown"}`,
-														});
-													}
-												} catch (parseError) {
-													console.error(
-														"Error parsing email match:",
-														parseError,
-													);
-												}
-											}
-										}
-
-										emails = emailData;
-									} catch (error) {
-										console.error(
-											"Error getting account-specific emails:",
-											error,
-										);
-										// Fallback to general method if specific account fails
-										emails = await mailModule.getUnreadMails(args.limit);
-									}
-								} else {
-									// No account specified, use the general method
-									emails = await mailModule.getUnreadMails(args.limit);
-								}
-
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												emails.length > 0
-													? `Found ${emails.length} unread email(s)${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
-														emails
-															.map(
-																(email: any) =>
-																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
-															)
-															.join("\n\n")
-													: `No unread emails found${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "search": {
-								const searchDesc = args.searchTerm
-									|| args.searchSender
-									|| args.searchSubject
-									|| args.searchContent
-									|| "";
-								const emails = await mailModule.searchMails({
-									searchTerm: args.searchTerm,
-									searchSender: args.searchSender,
-									searchSubject: args.searchSubject,
-									searchContent: args.searchContent,
-									limit: args.limit,
-								});
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												emails.length > 0
-													? `Found ${emails.length} email(s) for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
-														emails
-															.map(
-																(email: any) =>
-																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
-															)
-															.join("\n\n")
-													: `No emails found for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "open": {
-								if (!args.subject) {
-									throw new Error(
-										"Subject is required for read operation (use the subject from a search/unread/latest result)",
-									);
-								}
-								const email = await mailModule.readMail(
-									args.subject,
-									args.searchTerm,
-									args.mailbox,
-								);
-								const attSection = email?.attachments?.length
-									? `\n\nAttachments (${email.attachments.length}):\n` +
-										email.attachments.map((a: any) =>
-											`- ${a.name} (${a.mimeType}) → ${a.path}`
-										).join("\n")
-									: "";
-								return {
-									content: [
-										{
-											type: "text",
-											text: email
-												? `From: ${email.sender}\nDate: ${email.dateSent}\nSubject: ${email.subject}\nMailbox: ${email.mailbox}${attSection}\n\n${email.content}`
-												: `No email found with subject "${args.subject}"`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "send": {
-								if (!args.to || !args.subject || !args.body) {
-									throw new Error(
-										"Recipient (to), subject, and body are required for send operation",
-									);
-								}
-								const result = await mailModule.sendMail(
-									args.to,
-									args.subject,
-									args.body,
-									args.cc,
-									args.bcc,
-								);
-								return {
-									content: [{ type: "text", text: result }],
-									isError: false,
-								};
-							}
-
-							case "mailboxes": {
-								if (args.account) {
-									const mailboxes = await mailModule.getMailboxesForAccount(
-										args.account,
-									);
-									return {
-										content: [
-											{
-												type: "text",
-												text:
-													mailboxes.length > 0
-														? `Found ${mailboxes.length} mailboxes for account "${args.account}":\n\n${mailboxes.join("\n")}`
-														: `No mailboxes found for account "${args.account}". Make sure the account name is correct.`,
-											},
-										],
-										isError: false,
-									};
-								} else {
-									const mailboxes = await mailModule.getMailboxes();
-									return {
-										content: [
-											{
-												type: "text",
-												text:
-													mailboxes.length > 0
-														? `Found ${mailboxes.length} mailboxes:\n\n${mailboxes.join("\n")}`
-														: "No mailboxes found. Make sure Mail app is running and properly configured.",
-											},
-										],
-										isError: false,
-									};
-								}
-							}
-
-							case "accounts": {
-								const accounts = await mailModule.getAccounts();
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												accounts.length > 0
-													? `Found ${accounts.length} email accounts:\n\n${accounts.join("\n")}`
-													: "No email accounts found. Make sure Mail app is configured with at least one account.",
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "latest": {
-								const account = args.account || undefined;
-								const emails = await mailModule.getLatestMails(
-									account,
-									args.limit,
-								);
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												emails.length > 0
-													? `Found ${emails.length} latest email(s)${account ? ` in account "${account}"` : ""}:\n\n` +
-														emails
-															.map(
-																(email: any) =>
-																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
-															)
-															.join("\n\n")
-													: `No latest emails found${account ? ` in account "${account}"` : ""}`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							default:
-								throw new Error(`Unknown operation: ${args.operation}`);
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error with mail operation: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-				case "reminders": {
-					if (!isRemindersArgs(args)) {
-						throw new Error("Invalid arguments for reminders tool");
-					}
-
-					try {
-						const remindersModule = await loadModule("reminders");
-
-						const { operation } = args;
-
-						if (operation === "list") {
-							// List all reminders
-							const lists = await remindersModule.getAllLists();
-							const allReminders = await remindersModule.getAllReminders();
-							return {
-								content: [
-									{
-										type: "text",
-										text: `Found ${lists.length} lists and ${allReminders.length} reminders.`,
-									},
-								],
-								lists,
-								reminders: allReminders,
-								isError: false,
-							};
-						} else if (operation === "search") {
-							// Search for reminders
-							const { searchText } = args;
-							const results = await remindersModule.searchReminders(
-								searchText!,
-							);
-							return {
-								content: [
-									{
-										type: "text",
-										text:
-											results.length > 0
-												? `Found ${results.length} reminders matching "${searchText}".`
-												: `No reminders found matching "${searchText}".`,
-									},
-								],
-								reminders: results,
-								isError: false,
-							};
-						} else if (operation === "open") {
-							// Open a reminder
-							const { searchText } = args;
-							const result = await remindersModule.openReminder(searchText!);
-							return {
-								content: [
-									{
-										type: "text",
-										text: result.success
-											? `Opened Reminders app. Found reminder: ${result.reminder?.name}`
-											: result.message,
-									},
-								],
-								...result,
-								isError: !result.success,
-							};
-						} else if (operation === "create") {
-							// Create a reminder
-							const { name, listName, notes, dueDate } = args;
-							const result = await remindersModule.createReminder(
-								name!,
-								listName,
-								notes,
-								dueDate,
-							);
-							return {
-								content: [
-									{
-										type: "text",
-										text: `Created reminder "${result.name}" ${listName ? `in list "${listName}"` : ""}.`,
-									},
-								],
-								success: true,
-								reminder: result,
-								isError: false,
-							};
-						} else if (operation === "listById") {
-							// Get reminders from a specific list by ID
-							const { listId, props } = args;
-							const results = await remindersModule.getRemindersFromListById(
-								listId!,
-								props,
-							);
-							return {
-								content: [
-									{
-										type: "text",
-										text:
-											results.length > 0
-												? `Found ${results.length} reminders in list with ID "${listId}".`
-												: `No reminders found in list with ID "${listId}".`,
-									},
-								],
-								reminders: results,
-								isError: false,
-							};
-						}
-
-						return {
-							content: [
-								{
-									type: "text",
-									text: "Unknown operation",
-								},
-							],
-							isError: true,
-						};
-					} catch (error) {
-						console.error("Error in reminders tool:", error);
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error in reminders tool: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-
-				case "calendar": {
-					if (!isCalendarArgs(args)) {
-						throw new Error("Invalid arguments for calendar tool");
-					}
-
-					try {
-						const calendarModule = await loadModule("calendar");
-						const { operation } = args;
-
-						switch (operation) {
-							case "search": {
-								const { searchText, limit, fromDate, toDate } = args;
-								const events = await calendarModule.searchEvents(
-									searchText!,
-									limit,
-									fromDate,
-									toDate,
-								);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												events.length > 0
-													? `Found ${events.length} events matching "${searchText}":\n\n${events
-															.map(
-																(event) =>
-																	`${event.title} (${new Date(event.startDate!).toLocaleString()} - ${new Date(event.endDate!).toLocaleString()})\n` +
-																	`Location: ${event.location || "Not specified"}\n` +
-																	`Calendar: ${event.calendarName}\n` +
-																	`ID: ${event.id}\n` +
-																	`${event.notes ? `Notes: ${event.notes}\n` : ""}`,
-															)
-															.join("\n\n")}`
-													: `No events found matching "${searchText}".`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "open": {
-								const { eventId } = args;
-								const result = await calendarModule.openEvent(eventId!);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.success
-												? result.message
-												: `Error opening event: ${result.message}`,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "list": {
-								const { limit, fromDate, toDate } = args;
-								const events = await calendarModule.getEvents(
-									limit,
-									fromDate,
-									toDate,
-								);
-
-								const startDateText = fromDate
-									? new Date(fromDate).toLocaleDateString()
-									: "today";
-								const endDateText = toDate
-									? new Date(toDate).toLocaleDateString()
-									: "next 7 days";
-
-								return {
-									content: [
-										{
-											type: "text",
-											text:
-												events.length > 0
-													? `Found ${events.length} events from ${startDateText} to ${endDateText}:\n\n${events
-															.map(
-																(event) =>
-																	`${event.title} (${new Date(event.startDate!).toLocaleString()} - ${new Date(event.endDate!).toLocaleString()})\n` +
-																	`Location: ${event.location || "Not specified"}\n` +
-																	`Calendar: ${event.calendarName}\n` +
-																	`ID: ${event.id}`,
-															)
-															.join("\n\n")}`
-													: `No events found from ${startDateText} to ${endDateText}.`,
-										},
-									],
-									isError: false,
-								};
-							}
-
-							case "create": {
-								const {
-									title,
-									startDate,
-									endDate,
-									location,
-									notes,
-									isAllDay,
-									calendarName,
-								} = args;
-								const result = await calendarModule.createEvent(
-									title!,
-									startDate!,
-									endDate!,
-									location,
-									notes,
-									isAllDay,
-									calendarName,
-								);
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.success
-												? `${result.message} Event scheduled from ${new Date(startDate!).toLocaleString()} to ${new Date(endDate!).toLocaleString()}${result.eventId ? `\nEvent ID: ${result.eventId}` : ""}`
-												: `Error creating event: ${result.message}`,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							default:
-								throw new Error(`Unknown calendar operation: ${operation}`);
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error in calendar tool: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-				case "maps": {
-					if (!isMapsArgs(args)) {
-						throw new Error("Invalid arguments for maps tool");
-					}
-
-					try {
-						const mapsModule = await loadModule("maps");
-						const { operation } = args;
-
-						switch (operation) {
-							case "search": {
-								const { query, limit } = args;
-								if (!query) {
-									throw new Error(
-										"Search query is required for search operation",
-									);
-								}
-
-								const result = await mapsModule.searchLocations(query, limit);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.success
-												? `${result.message}\n\n${result.locations
-														.map(
-															(location) =>
-																`Name: ${location.name}\n` +
-																`Address: ${location.address}\n` +
-																`${location.latitude && location.longitude ? `Coordinates: ${location.latitude}, ${location.longitude}\n` : ""}`,
-														)
-														.join("\n\n")}`
-												: `${result.message}`,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "save": {
-								const { name, address } = args;
-								if (!name || !address) {
-									throw new Error(
-										"Name and address are required for save operation",
-									);
-								}
-
-								const result = await mapsModule.saveLocation(name, address);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "pin": {
-								const { name, address } = args;
-								if (!name || !address) {
-									throw new Error(
-										"Name and address are required for pin operation",
-									);
-								}
-
-								const result = await mapsModule.dropPin(name, address);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "directions": {
-								const { fromAddress, toAddress, transportType } = args;
-								if (!fromAddress || !toAddress) {
-									throw new Error(
-										"From and to addresses are required for directions operation",
-									);
-								}
-
-								const result = await mapsModule.getDirections(
-									fromAddress,
-									toAddress,
-									transportType as "driving" | "walking" | "transit",
-								);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "listGuides": {
-								const result = await mapsModule.listGuides();
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "addToGuide": {
-								const { address, guideName } = args;
-								if (!address || !guideName) {
-									throw new Error(
-										"Address and guideName are required for addToGuide operation",
-									);
-								}
-
-								const result = await mapsModule.addToGuide(address, guideName);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							case "createGuide": {
-								const { guideName } = args;
-								if (!guideName) {
-									throw new Error(
-										"Guide name is required for createGuide operation",
-									);
-								}
-
-								const result = await mapsModule.createGuide(guideName);
-
-								return {
-									content: [
-										{
-											type: "text",
-											text: result.message,
-										},
-									],
-									isError: !result.success,
-								};
-							}
-
-							default:
-								throw new Error(`Unknown maps operation: ${operation}`);
-						}
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						return {
-							content: [
-								{
-									type: "text",
-									text: errorMessage.includes("access") ? errorMessage : `Error in maps tool: ${errorMessage}`,
-								},
-							],
-							isError: true,
-						};
-					}
-				}
-
-				default:
-					return {
-						content: [{ type: "text", text: `Unknown tool: ${name}` }],
-						isError: true,
-					};
-			}
-		} catch (error) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-					},
-				],
-				isError: true,
-			};
-		}
-	});
-
-	// Start the server transport
-	console.error("Setting up MCP server transport...");
-
-	(async () => {
-		try {
-			console.error("Initializing transport...");
-			const transport = new StdioServerTransport();
-
-			// Ensure stdout is only used for JSON messages
-			console.error("Setting up stdout filter...");
-			const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-			process.stdout.write = (chunk: any, encoding?: any, callback?: any) => {
-				// Only allow JSON messages to pass through
-				if (typeof chunk === "string" && !chunk.startsWith("{")) {
-					console.error("Filtering non-JSON stdout message");
-					return true; // Silently skip non-JSON messages
-				}
-				return originalStdoutWrite(chunk, encoding, callback);
-			};
-
-			console.error("Connecting transport to server...");
-			await server.connect(transport);
-			console.error("Server connected successfully!");
-		} catch (error) {
-			console.error("Failed to initialize MCP server:", error);
-			process.exit(1);
-		}
-	})();
-}
-
-// Helper functions for argument type checking
-function isContactsArgs(args: unknown): args is {
-	operation?: string;
-	name?: string;
-	birthday?: string;
-	phone?: string;
-	email?: string;
-	newName?: string;
-} {
-	return typeof args === "object" && args !== null;
-}
-
-function isNotesArgs(args: unknown): args is {
-	operation: "search" | "list" | "create";
-	searchText?: string;
-	title?: string;
-	body?: string;
-	folderName?: string;
-} {
-	if (typeof args !== "object" || args === null) {
-		return false;
-	}
-
-	const { operation } = args as { operation?: unknown };
-	if (typeof operation !== "string") {
-		return false;
-	}
-
-	if (!["search", "list", "create"].includes(operation)) {
-		return false;
-	}
-
-	// Validate fields based on operation
-	if (operation === "search") {
-		const { searchText } = args as { searchText?: unknown };
-		if (typeof searchText !== "string" || searchText === "") {
-			return false;
-		}
-	}
-
-	if (operation === "create") {
-		const { title, body } = args as { title?: unknown; body?: unknown };
-		if (typeof title !== "string" || title === "" || typeof body !== "string") {
-			return false;
-		}
-
-		// Check folderName if provided
-		const { folderName } = args as { folderName?: unknown };
-		if (
-			folderName !== undefined &&
-			(typeof folderName !== "string" || folderName === "")
-		) {
-			return false;
-		}
-	}
-
-	return true;
-}
-
-function isMessagesArgs(args: unknown): args is {
-	operation: "send" | "read" | "schedule";
-	contactName?: string;
-	phoneNumber?: string;
-	message?: string;
-	limit?: number;
-	scheduledTime?: string;
-} {
-	if (typeof args !== "object" || args === null) return false;
-
-	const { operation, contactName, phoneNumber, message, limit, scheduledTime } = args as any;
-
-	if (
-		!operation ||
-		!["send", "read", "schedule"].includes(operation)
-	) {
-		return false;
-	}
-
-	// Validate required fields based on operation
-	switch (operation) {
-		case "send":
-		case "schedule":
-			if (!message) return false;
-			if (operation === "schedule" && !scheduledTime) return false;
-			break;
-		case "read":
-			// No additional validation needed - either contactName or phoneNumber will be resolved
-			break;
-	}
-	
-	// Validate that at least one of contactName or phoneNumber is provided
-	if (!contactName && !phoneNumber) {
-		return false;
-	}
-
-	// Validate field types if present
-	if (contactName && typeof contactName !== "string") return false;
-	if (phoneNumber && typeof phoneNumber !== "string") return false;
-	if (message && typeof message !== "string") return false;
-	if (limit && typeof limit !== "number") return false;
-	if (scheduledTime && typeof scheduledTime !== "string") return false;
-
-	return true;
-}
-
-function isMailArgs(args: unknown): args is {
-	operation: "unread" | "search" | "open" | "send" | "mailboxes" | "accounts" | "latest";
-	account?: string;
-	mailbox?: string;
-	limit?: number;
-	searchTerm?: string;
-	searchSender?: string;
-	searchSubject?: string;
-	searchContent?: string;
-	to?: string;
-	subject?: string;
-	body?: string;
-	cc?: string;
-	bcc?: string;
-} {
-	if (typeof args !== "object" || args === null) return false;
-
-	const {
-		operation,
-		account,
-		mailbox,
-		limit,
-		searchTerm,
-		searchSender,
-		searchSubject,
-		searchContent,
-		to,
-		subject,
-		body,
-		cc,
-		bcc,
-	} = args as any;
-
-	if (
-		!operation ||
-		!["unread", "search", "open", "send", "mailboxes", "accounts", "latest"].includes(
-			operation,
-		)
-	) {
-		return false;
-	}
-
-	// Validate required fields based on operation
-	switch (operation) {
-		case "search":
-			// At least one search parameter required
-			if (!searchTerm && !searchSender && !searchSubject && !searchContent) return false;
-			break;
-		case "send":
-			if (
-				!to ||
-				typeof to !== "string" ||
-				!subject ||
-				typeof subject !== "string" ||
-				!body ||
-				typeof body !== "string"
-			)
-				return false;
-			break;
-		case "unread":
-		case "mailboxes":
-		case "accounts":
-		case "latest":
-			// No additional required fields
-			break;
-	}
-
-	// Validate field types if present
-	if (account && typeof account !== "string") return false;
-	if (mailbox && typeof mailbox !== "string") return false;
-	if (limit && typeof limit !== "number") return false;
-	if (searchTerm && typeof searchTerm !== "string") return false;
-	if (searchSender && typeof searchSender !== "string") return false;
-	if (searchSubject && typeof searchSubject !== "string") return false;
-	if (searchContent && typeof searchContent !== "string") return false;
-	if (cc && typeof cc !== "string") return false;
-	if (bcc && typeof bcc !== "string") return false;
-
-	return true;
-}
-
-function isRemindersArgs(args: unknown): args is {
-	operation: "list" | "search" | "open" | "create" | "listById";
-	searchText?: string;
-	name?: string;
-	listName?: string;
-	listId?: string;
-	props?: string[];
-	notes?: string;
-	dueDate?: string;
-} {
-	if (typeof args !== "object" || args === null) {
-		return false;
-	}
-
-	const { operation } = args as any;
-	if (typeof operation !== "string") {
-		return false;
-	}
-
-	if (!["list", "search", "open", "create", "listById"].includes(operation)) {
-		return false;
-	}
-
-	// For search and open operations, searchText is required
-	if (
-		(operation === "search" || operation === "open") &&
-		(typeof (args as any).searchText !== "string" ||
-			(args as any).searchText === "")
-	) {
-		return false;
-	}
-
-	// For create operation, name is required
-	if (
-		operation === "create" &&
-		(typeof (args as any).name !== "string" || (args as any).name === "")
-	) {
-		return false;
-	}
-
-	// For listById operation, listId is required
-	if (
-		operation === "listById" &&
-		(typeof (args as any).listId !== "string" || (args as any).listId === "")
-	) {
-		return false;
-	}
-
-	return true;
-}
-
-
-function isCalendarArgs(args: unknown): args is {
-	operation: "search" | "open" | "list" | "create";
-	searchText?: string;
-	eventId?: string;
-	limit?: number;
-	fromDate?: string;
-	toDate?: string;
-	title?: string;
-	startDate?: string;
-	endDate?: string;
-	location?: string;
-	notes?: string;
-	isAllDay?: boolean;
-	calendarName?: string;
-} {
-	if (typeof args !== "object" || args === null) {
-		return false;
-	}
-
-	const { operation } = args as { operation?: unknown };
-	if (typeof operation !== "string") {
-		return false;
-	}
-
-	if (!["search", "open", "list", "create"].includes(operation)) {
-		return false;
-	}
-
-	// Check that required parameters are present for each operation
-	if (operation === "search") {
-		const { searchText } = args as { searchText?: unknown };
-		if (typeof searchText !== "string") {
-			return false;
-		}
-	}
-
-	if (operation === "open") {
-		const { eventId } = args as { eventId?: unknown };
-		if (typeof eventId !== "string") {
-			return false;
-		}
-	}
-
-	if (operation === "create") {
-		const { title, startDate, endDate } = args as {
-			title?: unknown;
-			startDate?: unknown;
-			endDate?: unknown;
-		};
-
-		if (
-			typeof title !== "string" ||
-			typeof startDate !== "string" ||
-			typeof endDate !== "string"
-		) {
-			return false;
-		}
-	}
-
-	return true;
-}
-
-function isMapsArgs(args: unknown): args is {
-	operation:
-		| "search"
-		| "save"
-		| "directions"
-		| "pin"
-		| "listGuides"
-		| "addToGuide"
-		| "createGuide";
-	query?: string;
-	limit?: number;
-	name?: string;
-	address?: string;
-	fromAddress?: string;
-	toAddress?: string;
-	transportType?: string;
-	guideName?: string;
-} {
-	if (typeof args !== "object" || args === null) {
-		return false;
-	}
-
-	const { operation } = args as { operation?: unknown };
-	if (typeof operation !== "string") {
-		return false;
-	}
-
-	if (
-		![
-			"search",
-			"save",
-			"directions",
-			"pin",
-			"listGuides",
-			"addToGuide",
-			"createGuide",
-		].includes(operation)
-	) {
-		return false;
-	}
-
-	// Check that required parameters are present for each operation
-	if (operation === "search") {
-		const { query } = args as { query?: unknown };
-		if (typeof query !== "string" || query === "") {
-			return false;
-		}
-	}
-
-	if (operation === "save" || operation === "pin") {
-		const { name, address } = args as { name?: unknown; address?: unknown };
-		if (
-			typeof name !== "string" ||
-			name === "" ||
-			typeof address !== "string" ||
-			address === ""
-		) {
-			return false;
-		}
-	}
-
-	if (operation === "directions") {
-		const { fromAddress, toAddress } = args as {
-			fromAddress?: unknown;
-			toAddress?: unknown;
-		};
-		if (
-			typeof fromAddress !== "string" ||
-			fromAddress === "" ||
-			typeof toAddress !== "string" ||
-			toAddress === ""
-		) {
-			return false;
-		}
-
-		// Check transportType if provided
-		const { transportType } = args as { transportType?: unknown };
-		if (
-			transportType !== undefined &&
-			(typeof transportType !== "string" ||
-				!["driving", "walking", "transit"].includes(transportType))
-		) {
-			return false;
-		}
-	}
-
-	if (operation === "createGuide") {
-		const { guideName } = args as { guideName?: unknown };
-		if (typeof guideName !== "string" || guideName === "") {
-			return false;
-		}
-	}
-
-	if (operation === "addToGuide") {
-		const { address, guideName } = args as {
-			address?: unknown;
-			guideName?: unknown;
-		};
-		if (
-			typeof address !== "string" ||
-			address === "" ||
-			typeof guideName !== "string" ||
-			guideName === ""
-		) {
-			return false;
-		}
-	}
-
-	return true;
+  console.error(
+    `Initializing server in ${safeModeFallback ? "safe" : "standard"} mode...`,
+  );
+
+  server = new Server(
+    {
+      name: "Apple MCP tools",
+      version: "1.0.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    },
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    console.error("DEBUG: Available tools:", tools.map(t => t.name));
+    return { tools };
+  });
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    try {
+      const { name, arguments: args } = request.params;
+      if (!args) throw new Error("No arguments provided");
+
+      switch (name) {
+
+        // ==================== Contacts ====================
+
+        case "contacts-search": {
+          const mod = await loadModule("contacts");
+          if (args.name) {
+            const found = await mod.findContacts(args.name as string);
+            if (found.length === 0) {
+              return successResult(
+                `No contact found for "${args.name}". Try a different name or omit name to list all.`,
+              );
+            }
+            const formatted = found.map((c: any) => {
+              const parts = [c.name];
+              if (c.phones.length > 0) parts.push(`Phone: ${c.phones.join(", ")}`);
+              if (c.emails.length > 0) parts.push(`Email: ${c.emails.join(", ")}`);
+              if (c.birthday) parts.push(`Birthday: ${c.birthday}`);
+              return parts.join("\n");
+            });
+            return successResult(
+              `Found ${found.length} contact${found.length > 1 ? "s" : ""} matching "${args.name}":\n\n${formatted.join("\n\n")}`,
+            );
+          }
+          const allNumbers = await mod.getAllNumbers();
+          const contactCount = Object.keys(allNumbers).length;
+          if (contactCount === 0) {
+            return successResult(
+              "No contacts found in the address book. Please make sure you have granted access to Contacts.",
+            );
+          }
+          const formattedContacts = Object.entries(allNumbers)
+            .filter(([_, phones]: [string, any]) => phones.length > 0)
+            .map(([cName, phones]: [string, any]) => `${cName}: ${phones.join(", ")}`);
+          return successResult(
+            formattedContacts.length > 0
+              ? `Found ${contactCount} contacts:\n\n${formattedContacts.join("\n")}`
+              : "Found contacts but none have phone numbers. Try searching by name to see more details.",
+          );
+        }
+
+        case "contacts-edit": {
+          const mod = await loadModule("contacts");
+          if (!args.name) return errorResult("Name is required for edit operation.");
+          const updates: Record<string, string | null> = {};
+          if ("birthday" in args) updates.birthday = args.birthday === "" ? null : args.birthday as string;
+          if ("phone" in args) updates.phone = args.phone === "" ? null : args.phone as string;
+          if ("email" in args) updates.email = args.email === "" ? null : args.email as string;
+          if ("newName" in args) updates.newName = args.newName as string;
+          const result = await mod.editContact(args.name as string, updates);
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        case "contacts-delete": {
+          const mod = await loadModule("contacts");
+          if (!args.name) return errorResult("Name is required for delete operation.");
+          const result = await mod.deleteContact(args.name as string);
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        // ==================== Notes ====================
+
+        case "notes-search": {
+          const mod = await loadModule("notes");
+          if (!args.searchText) return errorResult("Search text is required.");
+          const foundNotes = await mod.findNote(args.searchText as string);
+          return successResult(
+            foundNotes.length
+              ? foundNotes.map((note) => {
+                  const priority = note.priority === "title" ? "TITLE MATCH" : "CONTENT MATCH";
+                  return `${priority}\n${note.name}:\n${note.content}`;
+                }).join("\n\n")
+              : `No notes found for "${args.searchText}"`,
+          );
+        }
+
+        case "notes-list": {
+          const mod = await loadModule("notes");
+          const allNotes = await mod.getAllNotes();
+          return successResult(
+            allNotes.length
+              ? allNotes.map((note) => `${note.name}:\n${note.content}`).join("\n\n")
+              : "No notes exist.",
+          );
+        }
+
+        case "notes-create": {
+          const mod = await loadModule("notes");
+          if (!args.title || !args.body) {
+            return errorResult("Title and body are required for create operation.");
+          }
+          const result = await mod.createNote(
+            args.title as string,
+            args.body as string,
+            args.folderName as string | undefined,
+          );
+          return result.success
+            ? successResult(
+                `Created note "${args.title}" in folder "${result.folderName}"${result.usedDefaultFolder ? " (created new folder)" : ""}.`,
+              )
+            : errorResult(`Failed to create note: ${result.message}`);
+        }
+
+        // ==================== Messages ====================
+
+        case "messages-read": {
+          const phone = await resolvePhoneNumber(args as any);
+          const mod = await loadModule("message");
+          const messages = await mod.readMessages(phone, args.limit as number | undefined);
+          return successResult(
+            messages.length > 0
+              ? messages
+                  .map(
+                    (msg) =>
+                      `[${new Date(msg.date).toLocaleString()}] ${msg.is_from_me ? "Me" : msg.sender}: ${msg.content}`,
+                  )
+                  .join("\n")
+              : "No messages found",
+          );
+        }
+
+        case "messages-send": {
+          const phone = await resolvePhoneNumber(args as any);
+          if (!args.message) return errorResult("Message is required.");
+          const mod = await loadModule("message");
+          await mod.sendMessage(phone, args.message as string);
+          return successResult(`Message sent to ${phone}`);
+        }
+
+        case "messages-schedule": {
+          const phone = await resolvePhoneNumber(args as any);
+          if (!args.message || !args.scheduledTime) {
+            return errorResult("Message and scheduledTime are required.");
+          }
+          const mod = await loadModule("message");
+          const scheduledMsg = await mod.scheduleMessage(
+            phone,
+            args.message as string,
+            new Date(args.scheduledTime as string),
+          );
+          return successResult(
+            `Message scheduled to be sent to ${phone} at ${scheduledMsg.scheduledTime}`,
+          );
+        }
+
+        // ==================== Mail ====================
+
+        case "mail-unread": {
+          const mod = await loadModule("mail");
+          let emails;
+          if (args.account) {
+            emails = await mod.getUnreadMailsForAccount(
+              args.account as string,
+              args.mailbox as string | undefined,
+              args.limit as number | undefined,
+            );
+          } else {
+            emails = await mod.getUnreadMails(args.limit as number | undefined);
+          }
+          return successResult(
+            emails.length > 0
+              ? `Found ${emails.length} unread email(s)${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
+                emails
+                  .map(
+                    (email: any) =>
+                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
+                  )
+                  .join("\n\n")
+              : `No unread emails found${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
+          );
+        }
+
+        case "mail-search": {
+          const mod = await loadModule("mail");
+          const searchDesc = (args.searchTerm || args.searchSender || args.searchSubject || args.searchContent || "") as string;
+          const emails = await mod.searchMails({
+            searchTerm: args.searchTerm as string | undefined,
+            searchSender: args.searchSender as string | undefined,
+            searchSubject: args.searchSubject as string | undefined,
+            searchContent: args.searchContent as string | undefined,
+            limit: args.limit as number | undefined,
+          });
+          return successResult(
+            emails.length > 0
+              ? `Found ${emails.length} email(s) for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
+                emails
+                  .map(
+                    (email: any) =>
+                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
+                  )
+                  .join("\n\n")
+              : `No emails found for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
+          );
+        }
+
+        case "mail-open": {
+          const mod = await loadModule("mail");
+          if (!args.subject) {
+            return errorResult("Subject is required (use subject from a search/unread/latest result).");
+          }
+          const email = await mod.readMail(
+            args.subject as string,
+            args.searchTerm as string | undefined,
+            args.mailbox as string | undefined,
+          );
+          const attSection = email?.attachments?.length
+            ? `\n\nAttachments (${email.attachments.length}):\n` +
+              email.attachments.map((a: any) => `- ${a.name} (${a.mimeType}) -> ${a.path}`).join("\n")
+            : "";
+          return successResult(
+            email
+              ? `From: ${email.sender}\nDate: ${email.dateSent}\nSubject: ${email.subject}\nMailbox: ${email.mailbox}${attSection}\n\n${email.content}`
+              : `No email found with subject "${args.subject}"`,
+          );
+        }
+
+        case "mail-latest": {
+          const mod = await loadModule("mail");
+          const account = (args.account as string) || undefined;
+          const emails = await mod.getLatestMails(account, args.limit as number | undefined);
+          return successResult(
+            emails.length > 0
+              ? `Found ${emails.length} latest email(s)${account ? ` in account "${account}"` : ""}:\n\n` +
+                emails
+                  .map(
+                    (email: any) =>
+                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
+                  )
+                  .join("\n\n")
+              : `No latest emails found${account ? ` in account "${account}"` : ""}`,
+          );
+        }
+
+        case "mail-mailboxes": {
+          const mod = await loadModule("mail");
+          if (args.account) {
+            const mailboxes = await mod.getMailboxesForAccount(args.account as string);
+            return successResult(
+              mailboxes.length > 0
+                ? `Found ${mailboxes.length} mailboxes for account "${args.account}":\n\n${mailboxes.join("\n")}`
+                : `No mailboxes found for account "${args.account}". Make sure the account name is correct.`,
+            );
+          }
+          const mailboxes = await mod.getMailboxes();
+          return successResult(
+            mailboxes.length > 0
+              ? `Found ${mailboxes.length} mailboxes:\n\n${mailboxes.join("\n")}`
+              : "No mailboxes found. Make sure Mail app is running and properly configured.",
+          );
+        }
+
+        case "mail-accounts": {
+          const mod = await loadModule("mail");
+          const accounts = await mod.getAccounts();
+          return successResult(
+            accounts.length > 0
+              ? `Found ${accounts.length} email accounts:\n\n${accounts.join("\n")}`
+              : "No email accounts found. Make sure Mail app is configured with at least one account.",
+          );
+        }
+
+        case "mail-send": {
+          const mod = await loadModule("mail");
+          if (!args.to || !args.subject || !args.body) {
+            return errorResult("Recipient (to), subject, and body are required.");
+          }
+          const result = await mod.sendMail(
+            args.to as string,
+            args.subject as string,
+            args.body as string,
+            args.cc as string | undefined,
+            args.bcc as string | undefined,
+          );
+          return successResult(result!);
+        }
+
+        // ==================== Reminders ====================
+
+        case "reminders-list": {
+          const mod = await loadModule("reminders");
+          const lists = await mod.getAllLists();
+          const allReminders = await mod.getAllReminders();
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Found ${lists.length} lists and ${allReminders.length} reminders.`,
+            }],
+            lists,
+            reminders: allReminders,
+            isError: false,
+          };
+        }
+
+        case "reminders-search": {
+          const mod = await loadModule("reminders");
+          if (!args.searchText) return errorResult("Search text is required.");
+          const results = await mod.searchReminders(args.searchText as string);
+          return {
+            content: [{
+              type: "text" as const,
+              text: results.length > 0
+                ? `Found ${results.length} reminders matching "${args.searchText}".`
+                : `No reminders found matching "${args.searchText}".`,
+            }],
+            reminders: results,
+            isError: false,
+          };
+        }
+
+        case "reminders-list-by-id": {
+          const mod = await loadModule("reminders");
+          if (!args.listId) return errorResult("List ID is required.");
+          const results = await mod.getRemindersFromListById(
+            args.listId as string,
+            args.props as string[] | undefined,
+          );
+          return {
+            content: [{
+              type: "text" as const,
+              text: results.length > 0
+                ? `Found ${results.length} reminders in list with ID "${args.listId}".`
+                : `No reminders found in list with ID "${args.listId}".`,
+            }],
+            reminders: results,
+            isError: false,
+          };
+        }
+
+        case "reminders-open": {
+          const mod = await loadModule("reminders");
+          if (!args.searchText) return errorResult("Search text is required.");
+          const result = await mod.openReminder(args.searchText as string);
+          return {
+            content: [{
+              type: "text" as const,
+              text: result.success
+                ? `Opened Reminders app. Found reminder: ${result.reminder?.name}`
+                : result.message,
+            }],
+            ...result,
+            isError: !result.success,
+          };
+        }
+
+        case "reminders-create": {
+          const mod = await loadModule("reminders");
+          if (!args.name) return errorResult("Name is required.");
+          const result = await mod.createReminder(
+            args.name as string,
+            args.listName as string | undefined,
+            args.notes as string | undefined,
+            args.dueDate as string | undefined,
+          );
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Created reminder "${result.name}" ${args.listName ? `in list "${args.listName}"` : ""}.`,
+            }],
+            success: true,
+            reminder: result,
+            isError: false,
+          };
+        }
+
+        // ==================== Calendar ====================
+
+        case "calendar-list": {
+          const mod = await loadModule("calendar");
+          const events = await mod.getEvents(
+            args.limit as number | undefined,
+            args.fromDate as string | undefined,
+            args.toDate as string | undefined,
+          );
+          const startDateText = args.fromDate
+            ? new Date(args.fromDate as string).toLocaleDateString()
+            : "today";
+          const endDateText = args.toDate
+            ? new Date(args.toDate as string).toLocaleDateString()
+            : "next 7 days";
+          return successResult(
+            events.length > 0
+              ? `Found ${events.length} events from ${startDateText} to ${endDateText}:\n\n${events
+                  .map(
+                    (event) =>
+                      `${event.title} (${new Date(event.startDate!).toLocaleString()} - ${new Date(event.endDate!).toLocaleString()})\n` +
+                      `Location: ${event.location || "Not specified"}\n` +
+                      `Calendar: ${event.calendarName}\n` +
+                      `ID: ${event.id}`,
+                  )
+                  .join("\n\n")}`
+              : `No events found from ${startDateText} to ${endDateText}.`,
+          );
+        }
+
+        case "calendar-search": {
+          const mod = await loadModule("calendar");
+          if (!args.searchText) return errorResult("Search text is required.");
+          const events = await mod.searchEvents(
+            args.searchText as string,
+            args.limit as number | undefined,
+            args.fromDate as string | undefined,
+            args.toDate as string | undefined,
+          );
+          return successResult(
+            events.length > 0
+              ? `Found ${events.length} events matching "${args.searchText}":\n\n${events
+                  .map(
+                    (event) =>
+                      `${event.title} (${new Date(event.startDate!).toLocaleString()} - ${new Date(event.endDate!).toLocaleString()})\n` +
+                      `Location: ${event.location || "Not specified"}\n` +
+                      `Calendar: ${event.calendarName}\n` +
+                      `ID: ${event.id}\n` +
+                      `${event.notes ? `Notes: ${event.notes}\n` : ""}`,
+                  )
+                  .join("\n\n")}`
+              : `No events found matching "${args.searchText}".`,
+          );
+        }
+
+        case "calendar-open": {
+          const mod = await loadModule("calendar");
+          if (!args.eventId) return errorResult("Event ID is required.");
+          const result = await mod.openEvent(args.eventId as string);
+          return result.success
+            ? successResult(result.message)
+            : errorResult(`Error opening event: ${result.message}`);
+        }
+
+        case "calendar-create": {
+          const mod = await loadModule("calendar");
+          if (!args.title || !args.startDate || !args.endDate) {
+            return errorResult("Title, startDate, and endDate are required.");
+          }
+          const result = await mod.createEvent(
+            args.title as string,
+            args.startDate as string,
+            args.endDate as string,
+            args.location as string | undefined,
+            args.notes as string | undefined,
+            args.isAllDay as boolean | undefined,
+            args.calendarName as string | undefined,
+          );
+          return result.success
+            ? successResult(
+                `${result.message} Event scheduled from ${new Date(args.startDate as string).toLocaleString()} to ${new Date(args.endDate as string).toLocaleString()}${result.eventId ? `\nEvent ID: ${result.eventId}` : ""}`,
+              )
+            : errorResult(`Error creating event: ${result.message}`);
+        }
+
+        // ==================== Maps ====================
+
+        case "maps-search": {
+          const mod = await loadModule("maps");
+          if (!args.query) return errorResult("Search query is required.");
+          const result = await mod.searchLocations(
+            args.query as string,
+            args.limit as number | undefined,
+          );
+          return result.success
+            ? successResult(
+                `${result.message}\n\n${result.locations
+                  .map(
+                    (location) =>
+                      `Name: ${location.name}\n` +
+                      `Address: ${location.address}\n` +
+                      `${location.latitude && location.longitude ? `Coordinates: ${location.latitude}, ${location.longitude}\n` : ""}`,
+                  )
+                  .join("\n\n")}`,
+              )
+            : errorResult(result.message);
+        }
+
+        case "maps-save": {
+          const mod = await loadModule("maps");
+          if (!args.name || !args.address) {
+            return errorResult("Name and address are required.");
+          }
+          const result = await mod.saveLocation(args.name as string, args.address as string);
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        case "maps-pin": {
+          const mod = await loadModule("maps");
+          if (!args.name || !args.address) {
+            return errorResult("Name and address are required.");
+          }
+          const result = await mod.dropPin(args.name as string, args.address as string);
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        case "maps-directions": {
+          const mod = await loadModule("maps");
+          if (!args.fromAddress || !args.toAddress) {
+            return errorResult("From and to addresses are required.");
+          }
+          const result = await mod.getDirections(
+            args.fromAddress as string,
+            args.toAddress as string,
+            args.transportType as "driving" | "walking" | "transit" | undefined,
+          );
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        case "maps-list-guides": {
+          const mod = await loadModule("maps");
+          const result = await mod.listGuides();
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        case "maps-add-to-guide": {
+          const mod = await loadModule("maps");
+          if (!args.address || !args.guideName) {
+            return errorResult("Address and guideName are required.");
+          }
+          const result = await mod.addToGuide(args.address as string, args.guideName as string);
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        case "maps-create-guide": {
+          const mod = await loadModule("maps");
+          if (!args.guideName) return errorResult("Guide name is required.");
+          const result = await mod.createGuide(args.guideName as string);
+          return result.success
+            ? successResult(result.message)
+            : errorResult(result.message);
+        }
+
+        default:
+          return errorResult(`Unknown tool: ${name}`);
+      }
+    } catch (error) {
+      return errorResult(
+        `Error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  });
+
+  // Start the server transport
+  console.error("Setting up MCP server transport...");
+
+  (async () => {
+    try {
+      console.error("Initializing transport...");
+      const transport = new StdioServerTransport();
+
+      console.error("Setting up stdout filter...");
+      const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (chunk: any, encoding?: any, callback?: any) => {
+        if (typeof chunk === "string" && !chunk.startsWith("{")) {
+          console.error("Filtering non-JSON stdout message");
+          return true;
+        }
+        return originalStdoutWrite(chunk, encoding, callback);
+      };
+
+      console.error("Connecting transport to server...");
+      await server.connect(transport);
+      console.error("Server connected successfully!");
+    } catch (error) {
+      console.error("Failed to initialize MCP server:", error);
+      process.exit(1);
+    }
+  })();
 }
