@@ -1,12 +1,17 @@
 import { runAppleScript } from "run-applescript";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import os from "os";
+import fs from "fs";
+
+const execFileAsync = promisify(execFile);
 
 const CONFIG = {
   MAX_EMAILS: 20,
   MAX_CONTENT_PREVIEW: 300,
+  ENVELOPE_DB: `${os.homedir()}/Library/Mail/V10/MailData/Envelope Index`,
 };
 
-const MSG_SEP = "<<<M>>>";
-const FIELD_SEP = "<<<F>>>";
 
 interface EmailAttachment {
   name: string;
@@ -22,81 +27,6 @@ interface EmailMessage {
   isRead: boolean;
   mailbox: string;
   attachments?: EmailAttachment[];
-}
-
-function parseMailOutput(output: string): EmailMessage[] {
-  const emails: EmailMessage[] = [];
-  if (!output || output.trim() === "") return emails;
-
-  const rawMsgs = output.split(MSG_SEP).filter(s => s.trim() !== "");
-  for (const raw of rawMsgs) {
-    const parts = raw.split(FIELD_SEP);
-    emails.push({
-      subject: (parts[0] || "").trim() || "No subject",
-      sender: (parts[1] || "").trim() || "Unknown sender",
-      dateSent: (parts[2] || "").trim(),
-      isRead: (parts[3] || "").trim() !== "false",
-      mailbox: (parts[4] || "").trim() || "Unknown",
-      content: (parts[5] || "").trim() || "",
-    });
-  }
-  return emails;
-}
-
-/**
- * Build AppleScript to extract emails from a set of messages.
- * Iterates messages, optionally filtering by read status or search term.
- */
-function buildMailScript(opts: {
-  source: string;
-  limit: number;
-  unreadOnly?: boolean;
-  searchTerm?: string;
-  mailboxName?: string;
-  includeContent?: boolean;
-}): string {
-  const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
-  const mbName = opts.mailboxName ? `"${opts.mailboxName}"` : "mbName";
-
-  // Build condition — combine read filter and search filter
-  const conditions: string[] = [];
-  if (opts.unreadOnly) conditions.push("read status of m is false");
-  if (opts.searchTerm) conditions.push(`(subj contains "${opts.searchTerm}" or sndr contains "${opts.searchTerm}")`);
-
-  const contentBlock = opts.includeContent !== false ? `
-            set cont to ""
-            try
-                set cont to content of m
-                if (length of cont) > ${contentLen} then
-                    set cont to (text 1 thru ${contentLen} of cont) & "..."
-                end if
-            on error
-                set cont to ""
-            end try` : "";
-
-  // If we need to check subject/sender for search, we must read them before the condition
-  const needsPreRead = opts.searchTerm != null;
-
-  return `
-tell application "Mail"
-    set output to ""
-    set count_ to 0
-    set lim to ${opts.limit}
-    set msgs to ${opts.source}
-    repeat with i from 1 to (count of msgs)
-        if count_ >= lim then exit repeat
-        set m to item i of msgs
-        set subj to subject of m
-        set sndr to sender of m
-        ${conditions.length > 0 ? `if ${conditions.join(" and ")} then` : ""}
-            set count_ to count_ + 1
-            set dt to ((date sent of m) as string)
-            set isRead to (read status of m) as string${contentBlock}
-            set output to output & "${MSG_SEP}" & subj & "${FIELD_SEP}" & sndr & "${FIELD_SEP}" & dt & "${FIELD_SEP}" & isRead & "${FIELD_SEP}" & ${mbName} & "${FIELD_SEP}" & cont
-        ${conditions.length > 0 ? "end if" : ""}
-    end repeat
-    return output
-end tell`;
 }
 
 async function checkMailAccess(): Promise<boolean> {
@@ -138,23 +68,52 @@ async function requestMailAccess(): Promise<{ hasAccess: boolean; message: strin
 }
 
 /**
- * Get unread emails from inbox
+ * Get unread emails via Envelope Index SQLite database.
  */
 async function getUnreadMails(limit = 10): Promise<EmailMessage[]> {
   try {
-    const accessResult = await requestMailAccess();
-    if (!accessResult.hasAccess) throw new Error(accessResult.message);
-
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
-    const script = buildMailScript({
-      source: "messages of inbox",
-      limit: maxEmails,
-      unreadOnly: true,
-      mailboxName: "Inbox",
-    });
+    const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
 
-    const result = (await runAppleScript(script)) as string;
-    return parseMailOutput(result);
+    const sql = `
+SELECT s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+       m.read,
+       REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
+       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
+FROM messages m
+JOIN subjects s ON m.subject = s.ROWID
+JOIN addresses a ON m.sender = a.ROWID
+JOIN mailboxes mb ON m.mailbox = mb.ROWID
+LEFT JOIN summaries sum2 ON m.summary = sum2.ROWID
+WHERE m.read = 0
+  AND mb.url NOT LIKE 'ews://%'
+  AND mb.url NOT LIKE '%/All%20Mail'
+  AND mb.url NOT LIKE '%/Alle%20e-mail'
+  AND mb.url NOT LIKE '%/Spam'
+  AND mb.url NOT LIKE '%/Trash'
+ORDER BY m.date_sent DESC
+LIMIT ${maxEmails};`;
+
+    const { stdout } = await execFileAsync("sqlite3", [
+      "-json", CONFIG.ENVELOPE_DB, sql,
+    ], { timeout: 10000 });
+
+    if (!stdout || stdout.trim() === "" || stdout.trim() === "[]") return [];
+
+    const rows = JSON.parse(stdout) as Array<{
+      subject: string; sender: string; dt: string;
+      read: number; mailbox_name: string; preview: string;
+    }>;
+
+    return rows.map(row => ({
+      subject: row.subject || "No subject",
+      sender: row.sender || "Unknown sender",
+      dateSent: row.dt || "",
+      isRead: false,
+      mailbox: row.mailbox_name || "Unknown",
+      content: row.preview || "",
+    }));
   } catch (error) {
     console.error(
       `Error getting unread emails: ${error instanceof Error ? error.message : String(error)}`,
@@ -163,86 +122,93 @@ async function getUnreadMails(limit = 10): Promise<EmailMessage[]> {
   }
 }
 
+interface SearchMailsOpts {
+  searchTerm?: string;
+  searchSender?: string;
+  searchSubject?: string;
+  searchContent?: string;
+  limit?: number;
+}
+
 /**
- * Search for emails by search term (searches subject and sender)
+ * Search for emails via Mail.app's Envelope Index SQLite database.
+ * ~100x faster than AppleScript `whose` clauses.
+ * - searchTerm: searches subject, sender, AND content (broad OR)
+ * - searchSender: searches sender only
+ * - searchSubject: searches subject only
+ * - searchContent: searches body content only
+ * Multiple specific fields are combined with AND.
  */
-async function searchMails(searchTerm: string, limit = 10): Promise<EmailMessage[]> {
+async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
   try {
-    const accessResult = await requestMailAccess();
-    if (!accessResult.hasAccess) throw new Error(accessResult.message);
-
-    if (!searchTerm || searchTerm.trim() === "") return [];
-
+    const { searchTerm, searchSender, searchSubject, searchContent } = opts;
+    const limit = opts.limit || 10;
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
-    const cleanTerm = searchTerm.replace(/"/g, '\\"');
     const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
 
-    // Use whose clause for fast search — inbox first, then all enabled mailboxes
-    const script = `
-tell application "Mail"
-    set output to ""
-    set count_ to 0
-    set lim to ${maxEmails}
+    // Build WHERE conditions (SQL LIKE with % wildcards)
+    const conditions: string[] = [];
 
-    -- Search inbox first (fast)
-    set matched to (messages of inbox whose subject contains "${cleanTerm}" or sender contains "${cleanTerm}")
-    repeat with i from 1 to (count of matched)
-        if count_ >= lim then exit repeat
-        set m to item i of matched
-        set count_ to count_ + 1
-        set subj to subject of m
-        set sndr to sender of m
-        set dt to ((date sent of m) as string)
-        set isRead to (read status of m) as string
-        set cont to ""
-        try
-            set cont to content of m
-            if (length of cont) > ${contentLen} then
-                set cont to (text 1 thru ${contentLen} of cont) & "..."
-            end if
-        on error
-            set cont to ""
-        end try
-        set output to output & "${MSG_SEP}" & subj & "${FIELD_SEP}" & sndr & "${FIELD_SEP}" & dt & "${FIELD_SEP}" & isRead & "${FIELD_SEP}" & "Inbox" & "${FIELD_SEP}" & cont
-    end repeat
+    if (searchTerm) {
+      const clean = searchTerm.replace(/'/g, "''");
+      conditions.push(`(s.subject LIKE '%${clean}%' OR a.comment LIKE '%${clean}%' OR a.address LIKE '%${clean}%' OR sum2.summary LIKE '%${clean}%')`);
+    }
+    if (searchSender) {
+      const clean = searchSender.replace(/'/g, "''");
+      conditions.push(`(a.comment LIKE '%${clean}%' OR a.address LIKE '%${clean}%')`);
+    }
+    if (searchSubject) {
+      const clean = searchSubject.replace(/'/g, "''");
+      conditions.push(`s.subject LIKE '%${clean}%'`);
+    }
+    if (searchContent) {
+      const clean = searchContent.replace(/'/g, "''");
+      conditions.push(`sum2.summary LIKE '%${clean}%'`);
+    }
 
-    -- If not enough results, search All Mail on enabled accounts (fast single query)
-    if count_ < lim then
-        repeat with acct in accounts
-            if enabled of acct then
-                try
-                    set mb to mailbox "All Mail" of acct
-                    set matched to (messages of mb whose subject contains "${cleanTerm}" or sender contains "${cleanTerm}")
-                    repeat with i from 1 to (count of matched)
-                        if count_ >= lim then exit repeat
-                        set m to item i of matched
-                        set count_ to count_ + 1
-                        set subj to subject of m
-                        set sndr to sender of m
-                        set dt to ((date sent of m) as string)
-                        set isRead to (read status of m) as string
-                        set cont to ""
-                        try
-                            set cont to content of m
-                            if (length of cont) > ${contentLen} then
-                                set cont to (text 1 thru ${contentLen} of cont) & "..."
-                            end if
-                        on error
-                            set cont to ""
-                        end try
-                        set output to output & "${MSG_SEP}" & subj & "${FIELD_SEP}" & sndr & "${FIELD_SEP}" & dt & "${FIELD_SEP}" & isRead & "${FIELD_SEP}" & "All Mail" & "${FIELD_SEP}" & cont
-                    end repeat
-                end try
-            end if
-            if count_ >= lim then exit repeat
-        end repeat
-    end if
+    if (conditions.length === 0) return [];
 
-    return output
-end tell`;
+    const whereClause = conditions.join(" AND ");
 
-    const result = (await runAppleScript(script)) as string;
-    return parseMailOutput(result);
+    const sql = `
+SELECT s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+       m.read,
+       REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
+       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
+FROM messages m
+JOIN subjects s ON m.subject = s.ROWID
+JOIN addresses a ON m.sender = a.ROWID
+JOIN mailboxes mb ON m.mailbox = mb.ROWID
+LEFT JOIN summaries sum2 ON m.summary = sum2.ROWID
+WHERE ${whereClause}
+  AND mb.url NOT LIKE 'ews://%'
+  AND mb.url NOT LIKE '%/All%20Mail'
+  AND mb.url NOT LIKE '%/Alle%20e-mail'
+ORDER BY m.date_sent DESC
+LIMIT ${maxEmails};`;
+
+    const { stdout } = await execFileAsync("sqlite3", [
+      "-json",
+      CONFIG.ENVELOPE_DB,
+      sql,
+    ], { timeout: 10000 });
+
+    if (!stdout || stdout.trim() === "" || stdout.trim() === "[]") return [];
+
+    const rows = JSON.parse(stdout) as Array<{
+      subject: string; sender: string; dt: string;
+      read: number; mailbox_name: string; preview: string;
+    }>;
+
+    return rows.map(row => ({
+      subject: row.subject || "No subject",
+      sender: row.sender || "Unknown sender",
+      dateSent: row.dt || "",
+      isRead: row.read !== 0,
+      mailbox: row.mailbox_name || "Unknown",
+      content: row.preview || "",
+    }));
   } catch (error) {
     console.error(
       `Error searching emails: ${error instanceof Error ? error.message : String(error)}`,
@@ -252,29 +218,52 @@ end tell`;
 }
 
 /**
- * Get latest emails (regardless of read status)
+ * Get latest emails (regardless of read status) via Envelope Index SQLite database.
  */
 async function getLatestMails(account?: string, limit = 5): Promise<EmailMessage[]> {
   try {
-    const accessResult = await requestMailAccess();
-    if (!accessResult.hasAccess) throw new Error(accessResult.message);
-
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
+    const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
 
-    // If account specified, get from that account's inbox; otherwise use global inbox
-    const source = account
-      ? `messages of mailbox "INBOX" of account "${account.replace(/"/g, '\\"')}"`
-      : "messages of inbox";
-    const mbName = account || "Inbox";
+    const sql = `
+SELECT s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+       m.read,
+       REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
+       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
+FROM messages m
+JOIN subjects s ON m.subject = s.ROWID
+JOIN addresses a ON m.sender = a.ROWID
+JOIN mailboxes mb ON m.mailbox = mb.ROWID
+LEFT JOIN summaries sum2 ON m.summary = sum2.ROWID
+WHERE mb.url NOT LIKE 'ews://%'
+  AND mb.url NOT LIKE '%/All%20Mail'
+  AND mb.url NOT LIKE '%/Alle%20e-mail'
+  AND mb.url NOT LIKE '%/Spam'
+  AND mb.url NOT LIKE '%/Trash'
+  AND mb.url NOT LIKE '%/Drafts'
+ORDER BY m.date_sent DESC
+LIMIT ${maxEmails};`;
 
-    const script = buildMailScript({
-      source,
-      limit: maxEmails,
-      mailboxName: mbName,
-    });
+    const { stdout } = await execFileAsync("sqlite3", [
+      "-json", CONFIG.ENVELOPE_DB, sql,
+    ], { timeout: 10000 });
 
-    const result = (await runAppleScript(script)) as string;
-    return parseMailOutput(result);
+    if (!stdout || stdout.trim() === "" || stdout.trim() === "[]") return [];
+
+    const rows = JSON.parse(stdout) as Array<{
+      subject: string; sender: string; dt: string;
+      read: number; mailbox_name: string; preview: string;
+    }>;
+
+    return rows.map(row => ({
+      subject: row.subject || "No subject",
+      sender: row.sender || "Unknown sender",
+      dateSent: row.dt || "",
+      isRead: row.read !== 0,
+      mailbox: row.mailbox_name || "Unknown",
+      content: row.preview || "",
+    }));
   } catch (error) {
     console.error(
       `Error getting latest emails: ${error instanceof Error ? error.message : String(error)}`,
@@ -301,9 +290,7 @@ async function sendMail(
     if (!subject || !subject.trim()) throw new Error("Subject is required");
     if (!body || !body.trim()) throw new Error("Email body is required");
 
-    const os = require("os");
     const tmpFile = `${os.tmpdir()}/email-body-${Date.now()}.txt`;
-    const fs = require("fs");
     fs.writeFileSync(tmpFile, body.trim(), "utf8");
 
     const script = `
@@ -532,90 +519,73 @@ async function readMail(subject: string, sender?: string, mailbox?: string): Pro
 
     if (!subject || !subject.trim()) throw new Error("Subject is required to identify the email");
 
-    const cleanSubject = subject.replace(/"/g, '\\"');
-
-    const os = require("os");
-    const fs = require("fs");
     const tmpBase = os.tmpdir();
     const timestamp = Date.now();
     const tmpDir = `${tmpBase}/mail-attachments-${timestamp}`;
     const srcFile = `${tmpBase}/mail-source-${timestamp}.txt`;
 
-    const senderWhose = sender
-      ? ` and sender contains "${sender.replace(/"/g, '\\"')}"`
-      : '';
-
-    // Step 1: Get metadata + message ID (small return, no -10000 risk)
-    const cleanMailbox = mailbox ? mailbox.replace(/"/g, '\\"') : '';
-
-    let searchSource: string;
-    if (cleanMailbox) {
-      // Specific mailbox requested — search it across accounts
-      searchSource = `set matched to {}
-    repeat with acct in accounts
-        if enabled of acct then
-            try
-                set mb to mailbox "${cleanMailbox}" of acct
-                set matched to (messages of mb whose subject contains "${cleanSubject}"${senderWhose})
-                if (count of matched) > 0 then exit repeat
-            end try
-        end if
-    end repeat`;
-    } else {
-      // No mailbox specified — try inbox first, then fall back to all mailboxes
-      searchSource = `set matched to (messages of inbox whose subject contains "${cleanSubject}"${senderWhose})
-    if (count of matched) = 0 then
-        repeat with acct in accounts
-            if enabled of acct then
-                try
-                    set matched to (messages of mailbox "All Mail" of acct whose subject contains "${cleanSubject}"${senderWhose})
-                    if (count of matched) > 0 then exit repeat
-                end try
-            end if
-        end repeat
-    end if`;
+    // Step 1: Find message via SQLite Envelope Index (instant)
+    const cleanSubject = subject.replace(/'/g, "''");
+    const conditions: string[] = [`s.subject LIKE '%${cleanSubject}%'`];
+    if (sender) {
+      const cleanSender = sender.replace(/'/g, "''");
+      conditions.push(`(a.comment LIKE '%${cleanSender}%' OR a.address LIKE '%${cleanSender}%')`);
+    }
+    if (mailbox) {
+      const cleanMailbox = mailbox.replace(/'/g, "''");
+      conditions.push(`mb.url LIKE '%${cleanMailbox.replace(/ /g, "%20")}%'`);
     }
 
-    const metaScript = `
-tell application "Mail"
-    ${searchSource}
-    if (count of matched) = 0 then return ""
-    set m to item 1 of matched
-    set subj to subject of m
-    set sndr to sender of m
-    set dt to ((date sent of m) as string)
-    set isRead to (read status of m) as string
-    set msgId to id of m
-    set mbName to ""
-    set acctName to ""
-    try
-        set mb to mailbox of m
-        set mbName to name of mb
-        set acctName to name of account of mb
-    end try
-    return subj & "${FIELD_SEP}" & sndr & "${FIELD_SEP}" & dt & "${FIELD_SEP}" & isRead & "${FIELD_SEP}" & mbName & "${FIELD_SEP}" & msgId & "${FIELD_SEP}" & acctName
-end tell`;
+    const sql = `
+SELECT m.ROWID as msg_id, s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+       m.read,
+       REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name
+FROM messages m
+JOIN subjects s ON m.subject = s.ROWID
+JOIN addresses a ON m.sender = a.ROWID
+JOIN mailboxes mb ON m.mailbox = mb.ROWID
+WHERE ${conditions.join(" AND ")}
+  AND mb.url NOT LIKE 'ews://%'
+  AND mb.url NOT LIKE '%/All%20Mail'
+  AND mb.url NOT LIKE '%/Alle%20e-mail'
+ORDER BY m.date_sent DESC
+LIMIT 1;`;
 
-    const result = (await runAppleScript(metaScript)) as string;
-    if (!result || result.trim() === "") return null;
+    const { stdout: metaOut } = await execFileAsync("sqlite3", [
+      "-json", CONFIG.ENVELOPE_DB, sql,
+    ], { timeout: 10000 });
 
-    const parts = result.split(FIELD_SEP);
-    const msgId = (parts[5] || "").trim();
-    const acctName = (parts[6] || "").trim();
-    const mbName = (parts[4] || "").trim();
+    if (!metaOut || metaOut.trim() === "" || metaOut.trim() === "[]") return null;
+
+    const rows = JSON.parse(metaOut) as Array<{
+      msg_id: number; subject: string; sender: string;
+      dt: string; read: number; mailbox_name: string;
+    }>;
+    if (rows.length === 0) return null;
+
+    const meta = rows[0];
+    const msgId = meta.msg_id;
+    const mbName = meta.mailbox_name;
 
     // Step 2: Get source + attachments via direct osascript (avoids AppleEvent size limit)
-    const { execFile } = require("child_process");
-    const { promisify } = require("util");
-    const execFileAsync = promisify(execFile);
-
-    const cleanAcct = acctName.replace(/"/g, '\\"');
+    // Find message by ID across enabled accounts in the known mailbox
     const cleanMb = mbName.replace(/"/g, '\\"');
     const attFile = `${tmpBase}/mail-att-info-${timestamp}.txt`;
     const srcScript = `
 tell application "Mail"
-    set msgs to (messages of mailbox "${cleanMb}" of account "${cleanAcct}" whose id is ${msgId})
-    set m to item 1 of msgs
+    set m to missing value
+    repeat with acct in accounts
+        try
+            set mb to mailbox "${cleanMb}" of acct
+            set msgs to (messages of mb whose id is ${msgId})
+            if (count of msgs) > 0 then
+                set m to item 1 of msgs
+                exit repeat
+            end if
+        end try
+    end repeat
+    if m is missing value then return
     set src to source of m
     do shell script "/usr/bin/printf '%s' " & quoted form of src & " > " & quoted form of "${srcFile}"
 
@@ -679,11 +649,11 @@ end tell`;
     } catch {}
 
     return {
-      subject: (parts[0] || "").trim() || "No subject",
-      sender: (parts[1] || "").trim() || "Unknown sender",
-      dateSent: (parts[2] || "").trim(),
-      isRead: (parts[3] || "").trim() !== "false",
-      mailbox: (parts[4] || "").trim() || "Inbox",
+      subject: meta.subject || "No subject",
+      sender: meta.sender || "Unknown sender",
+      dateSent: meta.dt || "",
+      isRead: meta.read !== 0,
+      mailbox: meta.mailbox_name || "Unknown",
       content,
       attachments: attachments.length > 0 ? attachments : undefined,
     };

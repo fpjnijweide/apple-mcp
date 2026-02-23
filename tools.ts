@@ -145,7 +145,19 @@ const CONTACTS_TOOL: Tool = {
         },
         searchTerm: {
           type: "string",
-          description: "Text to search for in emails (required for search operation)"
+          description: "General search across subject, sender, AND body content. Use for broad searches like a person's name. For precise filtering, use searchSender/searchSubject/searchContent instead."
+        },
+        searchSender: {
+          type: "string",
+          description: "Search by sender name or email address only (for search operation)"
+        },
+        searchSubject: {
+          type: "string",
+          description: "Search by subject line only (for search operation)"
+        },
+        searchContent: {
+          type: "string",
+          description: "Search by email body content only (for search operation)"
         },
         to: {
           type: "string",

@@ -764,29 +764,32 @@ end tell`;
 							}
 
 							case "search": {
-								if (!args.searchTerm) {
-									throw new Error(
-										"Search term is required for search operation",
-									);
-								}
-								const emails = await mailModule.searchMails(
-									args.searchTerm,
-									args.limit,
-								);
+								const searchDesc = args.searchTerm
+									|| args.searchSender
+									|| args.searchSubject
+									|| args.searchContent
+									|| "";
+								const emails = await mailModule.searchMails({
+									searchTerm: args.searchTerm,
+									searchSender: args.searchSender,
+									searchSubject: args.searchSubject,
+									searchContent: args.searchContent,
+									limit: args.limit,
+								});
 								return {
 									content: [
 										{
 											type: "text",
 											text:
 												emails.length > 0
-													? `Found ${emails.length} email(s) for "${args.searchTerm}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
+													? `Found ${emails.length} email(s) for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
 														emails
 															.map(
 																(email: any) =>
 																	`[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
 															)
 															.join("\n\n")
-													: `No emails found for "${args.searchTerm}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
+													: `No emails found for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
 										},
 									],
 									isError: false,
@@ -1547,6 +1550,9 @@ function isMailArgs(args: unknown): args is {
 	mailbox?: string;
 	limit?: number;
 	searchTerm?: string;
+	searchSender?: string;
+	searchSubject?: string;
+	searchContent?: string;
 	to?: string;
 	subject?: string;
 	body?: string;
@@ -1561,6 +1567,9 @@ function isMailArgs(args: unknown): args is {
 		mailbox,
 		limit,
 		searchTerm,
+		searchSender,
+		searchSubject,
+		searchContent,
 		to,
 		subject,
 		body,
@@ -1580,7 +1589,8 @@ function isMailArgs(args: unknown): args is {
 	// Validate required fields based on operation
 	switch (operation) {
 		case "search":
-			if (!searchTerm || typeof searchTerm !== "string") return false;
+			// At least one search parameter required
+			if (!searchTerm && !searchSender && !searchSubject && !searchContent) return false;
 			break;
 		case "send":
 			if (
@@ -1605,6 +1615,10 @@ function isMailArgs(args: unknown): args is {
 	if (account && typeof account !== "string") return false;
 	if (mailbox && typeof mailbox !== "string") return false;
 	if (limit && typeof limit !== "number") return false;
+	if (searchTerm && typeof searchTerm !== "string") return false;
+	if (searchSender && typeof searchSender !== "string") return false;
+	if (searchSubject && typeof searchSubject !== "string") return false;
+	if (searchContent && typeof searchContent !== "string") return false;
 	if (cc && typeof cc !== "string") return false;
 	if (bcc && typeof bcc !== "string") return false;
 

@@ -144,7 +144,7 @@ describe("Mail Integration Tests", () => {
       const searchTerms = ["notification", "apple", "security", "account"];
       
       for (const term of searchTerms) {
-        const searchResults = await mailModule.searchMails(term, 5);
+        const searchResults = await mailModule.searchMails({ searchTerm: term, limit: 5 });
         
         expect(Array.isArray(searchResults)).toBe(true);
         console.log(`Search for "${term}": found ${searchResults.length} results`);
@@ -174,7 +174,7 @@ describe("Mail Integration Tests", () => {
 
     it("should handle search with no results", async () => {
       const uniqueSearchTerm = "VeryUniqueSearchTerm12345";
-      const searchResults = await mailModule.searchMails(uniqueSearchTerm, 5);
+      const searchResults = await mailModule.searchMails({ searchTerm: uniqueSearchTerm, limit: 5 });
       
       expect(Array.isArray(searchResults)).toBe(true);
       expect(searchResults.length).toBe(0);
@@ -261,7 +261,7 @@ describe("Mail Integration Tests", () => {
     }, 10000);
 
     it("should handle empty search term gracefully", async () => {
-      const searchResults = await mailModule.searchMails("", 5);
+      const searchResults = await mailModule.searchMails({ searchTerm: "", limit: 5 });
       
       expect(Array.isArray(searchResults)).toBe(true);
       console.log("✅ Handled empty search term correctly");
