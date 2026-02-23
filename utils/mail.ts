@@ -1,4 +1,5 @@
 import { runAppleScript } from "run-applescript";
+import { Database } from "bun:sqlite";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import os from "os";
@@ -11,6 +12,19 @@ const CONFIG = {
   MAX_CONTENT_PREVIEW: 300,
   ENVELOPE_DB: `${os.homedir()}/Library/Mail/V10/MailData/Envelope Index`,
 };
+
+/**
+ * Run a read-only SQL query against the Mail Envelope Index.
+ * Uses bun:sqlite in-process — requires bun to have Full Disk Access.
+ */
+function queryEnvelopeDb<T>(sql: string): T[] {
+  const db = new Database(CONFIG.ENVELOPE_DB, { readonly: true });
+  try {
+    return db.query(sql).all() as T[];
+  } finally {
+    db.close();
+  }
+}
 
 
 interface EmailAttachment {
@@ -95,16 +109,10 @@ WHERE m.read = 0
 ORDER BY m.date_sent DESC
 LIMIT ${maxEmails};`;
 
-    const { stdout } = await execFileAsync("sqlite3", [
-      "-json", CONFIG.ENVELOPE_DB, sql,
-    ], { timeout: 10000 });
-
-    if (!stdout || stdout.trim() === "" || stdout.trim() === "[]") return [];
-
-    const rows = JSON.parse(stdout) as Array<{
+    const rows = queryEnvelopeDb<{
       subject: string; sender: string; dt: string;
       read: number; mailbox_name: string; preview: string;
-    }>;
+    }>(sql);
 
     return rows.map(row => ({
       subject: row.subject || "No subject",
@@ -188,18 +196,10 @@ WHERE ${whereClause}
 ORDER BY m.date_sent DESC
 LIMIT ${maxEmails};`;
 
-    const { stdout } = await execFileAsync("sqlite3", [
-      "-json",
-      CONFIG.ENVELOPE_DB,
-      sql,
-    ], { timeout: 10000 });
-
-    if (!stdout || stdout.trim() === "" || stdout.trim() === "[]") return [];
-
-    const rows = JSON.parse(stdout) as Array<{
+    const rows = queryEnvelopeDb<{
       subject: string; sender: string; dt: string;
       read: number; mailbox_name: string; preview: string;
-    }>;
+    }>(sql);
 
     return rows.map(row => ({
       subject: row.subject || "No subject",
@@ -245,16 +245,10 @@ WHERE mb.url NOT LIKE 'ews://%'
 ORDER BY m.date_sent DESC
 LIMIT ${maxEmails};`;
 
-    const { stdout } = await execFileAsync("sqlite3", [
-      "-json", CONFIG.ENVELOPE_DB, sql,
-    ], { timeout: 10000 });
-
-    if (!stdout || stdout.trim() === "" || stdout.trim() === "[]") return [];
-
-    const rows = JSON.parse(stdout) as Array<{
+    const rows = queryEnvelopeDb<{
       subject: string; sender: string; dt: string;
       read: number; mailbox_name: string; preview: string;
-    }>;
+    }>(sql);
 
     return rows.map(row => ({
       subject: row.subject || "No subject",
@@ -552,16 +546,11 @@ WHERE ${conditions.join(" AND ")}
 ORDER BY m.date_sent DESC
 LIMIT 1;`;
 
-    const { stdout: metaOut } = await execFileAsync("sqlite3", [
-      "-json", CONFIG.ENVELOPE_DB, sql,
-    ], { timeout: 10000 });
-
-    if (!metaOut || metaOut.trim() === "" || metaOut.trim() === "[]") return null;
-
-    const rows = JSON.parse(metaOut) as Array<{
+    const rows = queryEnvelopeDb<{
       msg_id: number; subject: string; sender: string;
       dt: string; read: number; mailbox_name: string;
-    }>;
+    }>(sql);
+
     if (rows.length === 0) return null;
 
     const meta = rows[0];
