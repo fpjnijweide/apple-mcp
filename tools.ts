@@ -205,17 +205,22 @@ const MAIL_ACCOUNTS: Tool = {
 
 const MAIL_SEND: Tool = {
   name: "mail-send",
-  description: "Send an email.",
+  description: "Send an email, save it as a draft, or reply in an existing thread. For a reply, give replyToSubject (and optionally replyToSender); 'to' and 'subject' are then taken from the original message. A reply contains only the new body, not the quoted original.",
   inputSchema: {
     type: "object",
     properties: {
-      to: { type: "string", description: "Recipient email address" },
-      subject: { type: "string", description: "Email subject" },
-      body: { type: "string", description: "Email body content" },
-      cc: { type: "string", description: "CC email address" },
-      bcc: { type: "string", description: "BCC email address" }
+      to: { type: "string", description: "Recipient address(es), comma-separated. Not needed for a reply." },
+      subject: { type: "string", description: "Email subject. Not needed for a reply." },
+      body: { type: "string", description: "Email body content (plain text)" },
+      cc: { type: "string", description: "CC address(es), comma-separated" },
+      bcc: { type: "string", description: "BCC address(es), comma-separated" },
+      attachments: { type: "array", items: { type: "string" }, description: "Absolute paths of files to attach" },
+      account: { type: "string", description: "Sender as configured in Mail, e.g. 'Name <me@example.com>' (default: Mail's default account)" },
+      draft: { type: "boolean", description: "Save to Drafts instead of sending (default false)" },
+      replyToSubject: { type: "string", description: "Reply to the most recent received message whose subject contains this text" },
+      replyToSender: { type: "string", description: "With replyToSubject: only match messages whose sender contains this text" }
     },
-    required: ["to", "subject", "body"]
+    required: ["body"]
   }
 };
 

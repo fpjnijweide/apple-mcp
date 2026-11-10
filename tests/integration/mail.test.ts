@@ -243,6 +243,17 @@ describe("Mail Integration Tests", () => {
     }, 15000);
   });
 
+  describe("sendMail options", () => {
+    it("should reject a missing attachment before touching Mail", async () => {
+      await expect(
+        mailModule.sendMail("a@example.com", "s", "b", undefined, undefined, {
+          attachments: ["/nonexistent/file.pdf"],
+          draft: true,
+        }),
+      ).rejects.toThrow("Attachment not found");
+    });
+  });
+
   describe("Error Handling", () => {
     it("should handle invalid email address gracefully", async () => {
       try {

@@ -484,15 +484,22 @@ function initServer() {
 
         case "mail-send": {
           const mod = await loadModule("mail");
-          if (!args.to || !args.subject || !args.body) {
-            return errorResult("Recipient (to), subject, and body are required.");
+          if (!args.body || (!args.replyToSubject && (!args.to || !args.subject))) {
+            return errorResult("Body is required, plus either to and subject, or replyToSubject.");
           }
           const result = await mod.sendMail(
-            args.to as string,
-            args.subject as string,
+            (args.to as string | undefined) ?? "",
+            (args.subject as string | undefined) ?? "",
             args.body as string,
             args.cc as string | undefined,
             args.bcc as string | undefined,
+            {
+              attachments: args.attachments as string[] | undefined,
+              account: args.account as string | undefined,
+              draft: args.draft as boolean | undefined,
+              replyToSubject: args.replyToSubject as string | undefined,
+              replyToSender: args.replyToSender as string | undefined,
+            },
           );
           return successResult(result!);
         }

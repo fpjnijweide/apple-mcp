@@ -269,44 +269,146 @@ LIMIT ${maxEmails};`;
 /**
  * Send an email
  */
+interface SendMailOptions {
+  /** Absolute paths of files to attach */
+  attachments?: string[];
+  /** Sender as configured in Mail, e.g. "Name <me@example.com>" */
+  account?: string;
+  /** Save to Drafts instead of sending */
+  draft?: boolean;
+  /** Reply to the most recent message whose subject contains this text */
+  replyToSubject?: string;
+  /** Narrow the reply target to a sender containing this text */
+  replyToSender?: string;
+}
+
+// Arguments reach AppleScript through argv, so no user text is interpolated into the script.
+const SEND_SCRIPT = `
+on run argv
+  set bodyText to read POSIX file (item 1 of argv) as «class utf8»
+  set subj to item 2 of argv
+  set toList to paragraphs of (item 3 of argv)
+  set ccList to paragraphs of (item 4 of argv)
+  set bccList to paragraphs of (item 5 of argv)
+  set attList to paragraphs of (item 6 of argv)
+  set senderAddr to item 7 of argv
+  set replySubj to item 8 of argv
+  set replySender to item 9 of argv
+  set asDraft to ((item 10 of argv) is "1")
+  with timeout of 300 seconds
+    tell application "Mail"
+      if replySubj is not "" then
+        set found to {}
+        repeat with acc in accounts
+          repeat with mbx in mailboxes of acc
+            set n to name of mbx
+            if n does not contain "Draft" and n does not contain "Trash" and n does not contain "Sent" then
+              try
+                if replySender is "" then
+                  set found to found & (messages of mbx whose subject contains replySubj)
+                else
+                  set found to found & (messages of mbx whose subject contains replySubj and sender contains replySender)
+                end if
+              end try
+            end if
+          end repeat
+        end repeat
+        if (count of found) is 0 then error "No message found to reply to: " & replySubj
+        set m to item 1 of found
+        repeat with x in found
+          if date received of x > date received of m then set m to x
+        end repeat
+        set r to reply m with opening window
+        set content of r to bodyText
+        if subj is not "" then set subject of r to subj
+      else
+        set r to make new outgoing message with properties {subject:subj, content:bodyText, visible:true}
+      end if
+      tell r
+        if senderAddr is not "" then set sender to senderAddr
+        repeat with a in toList
+          if (a as string) is not "" then make new to recipient at end of to recipients with properties {address:(a as string)}
+        end repeat
+        repeat with a in ccList
+          if (a as string) is not "" then make new cc recipient at end of cc recipients with properties {address:(a as string)}
+        end repeat
+        repeat with a in bccList
+          if (a as string) is not "" then make new bcc recipient at end of bcc recipients with properties {address:(a as string)}
+        end repeat
+        repeat with f in attList
+          if (f as string) is not "" then make new attachment with properties {file name:POSIX file (f as string)} at after the last paragraph of content
+        end repeat
+      end tell
+      set finalSubj to subject of r
+      set finalTo to address of to recipient 1 of r
+      -- Mail needs a moment to load attachments before the message is saved or sent
+      delay 4
+      if asDraft then
+        -- "close saving yes" alone does not save a scripted message; save first
+        save r
+        delay 2
+        close r saving yes
+        return "DRAFT" & linefeed & finalSubj & linefeed & finalTo
+      end if
+      send r
+      set state to "PENDING"
+      repeat 10 times
+        delay 2
+        try
+          if (count of (messages of sent mailbox whose subject is finalSubj and date sent > ((current date) - 180))) > 0 then
+            set state to "SENT"
+            exit repeat
+          end if
+        end try
+      end repeat
+      return state & linefeed & finalSubj & linefeed & finalTo
+    end tell
+  end timeout
+end run`;
+
+const splitAddresses = (s?: string): string =>
+  (s ?? "").split(/[,;\n]/).map((a) => a.trim()).filter(Boolean).join("\n");
+
 async function sendMail(
   to: string,
   subject: string,
   body: string,
   cc?: string,
   bcc?: string,
+  opts: SendMailOptions = {},
 ): Promise<string | undefined> {
   try {
+    const isReply = !!opts.replyToSubject?.trim();
+    if (!isReply && (!to || !to.trim())) throw new Error("To address is required");
+    if (!isReply && (!subject || !subject.trim())) throw new Error("Subject is required");
+    if (!body || !body.trim()) throw new Error("Email body is required");
+    const attachments = opts.attachments ?? [];
+    const missing = attachments.filter((f) => !fs.existsSync(f));
+    if (missing.length) throw new Error(`Attachment not found: ${missing.join(", ")}`);
+
     const accessResult = await requestMailAccess();
     if (!accessResult.hasAccess) throw new Error(accessResult.message);
 
-    if (!to || !to.trim()) throw new Error("To address is required");
-    if (!subject || !subject.trim()) throw new Error("Subject is required");
-    if (!body || !body.trim()) throw new Error("Email body is required");
-
     const tmpFile = `${os.tmpdir()}/email-body-${Date.now()}.txt`;
     fs.writeFileSync(tmpFile, body.trim(), "utf8");
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync("osascript", [
+        "-e", SEND_SCRIPT, tmpFile, subject ?? "", splitAddresses(to), splitAddresses(cc),
+        splitAddresses(bcc), attachments.join("\n"), opts.account ?? "",
+        opts.replyToSubject?.trim() ?? "", opts.replyToSender?.trim() ?? "", opts.draft ? "1" : "0",
+      ], { timeout: 320_000 }));
+    } finally {
+      try { fs.unlinkSync(tmpFile); } catch {}
+    }
 
-    const script = `
-tell application "Mail"
-    activate
-    set emailBody to read file POSIX file "${tmpFile}" as «class utf8»
-    set newMessage to make new outgoing message with properties {subject:"${subject.replace(/"/g, '\\"')}", content:emailBody, visible:true}
-    tell newMessage
-        make new to recipient with properties {address:"${to.replace(/"/g, '\\"')}"}
-        ${cc ? `make new cc recipient with properties {address:"${cc.replace(/"/g, '\\"')}"}` : ""}
-        ${bcc ? `make new bcc recipient with properties {address:"${bcc.replace(/"/g, '\\"')}"}` : ""}
-    end tell
-    send newMessage
-    return "SUCCESS"
-end tell`;
-
-    const result = (await runAppleScript(script)) as string;
-
-    try { fs.unlinkSync(tmpFile); } catch {}
-
-    if (result === "SUCCESS") {
-      return `Email sent to ${to} with subject "${subject}"`;
+    const [state, finalSubject, finalTo] = stdout.trim().split("\n");
+    const what = `"${finalSubject}" to ${finalTo}` +
+      (attachments.length ? ` with ${attachments.length} attachment(s)` : "");
+    if (state === "DRAFT") return `Draft saved: ${what}`;
+    if (state === "SENT") return `Email sent and confirmed in Sent: ${what}`;
+    if (state === "PENDING") {
+      return `Email handed to Mail but not yet visible in Sent after 20s (check the Outbox): ${what}`;
     }
     throw new Error("Failed to send email");
   } catch (error) {
