@@ -254,6 +254,22 @@ describe("Mail Integration Tests", () => {
     });
   });
 
+  describe("Proton Bridge message", () => {
+    it("should build a plain, threaded message without a quote block", async () => {
+      const { mailOptions } = await import("../../utils/mail-bridge.js");
+      const { default: MailComposer } = await import("nodemailer/lib/mail-composer/index.js");
+      const raw = (await new MailComposer(mailOptions({
+        from: "Me <me@example.com>", to: ["you@example.com"], cc: [], bcc: [],
+        subject: "Re: Hello", text: "Line one.\n\nLine two.", attachments: [],
+        inReplyTo: "<abc@example.com>", references: "<abc@example.com>",
+      })).compile().build()).toString();
+      expect(raw).toContain("In-Reply-To: <abc@example.com>");
+      expect(raw).toContain("Line one.");
+      expect(raw).not.toContain("blockquote");
+      expect(raw).not.toMatch(/^> /m);
+    });
+  });
+
   describe("Error Handling", () => {
     it("should handle invalid email address gracefully", async () => {
       try {

@@ -432,7 +432,7 @@ function initServer() {
             : "";
           return successResult(
             email
-              ? `From: ${email.sender}\nDate: ${email.dateSent}\nSubject: ${email.subject}\nMailbox: ${email.mailbox}${attSection}\n\n${email.content}`
+              ? `From: ${email.sender}\n${email.to ? `To: ${email.to}\n` : ""}${email.cc ? `Cc: ${email.cc}\n` : ""}Date: ${email.dateSent}\nSubject: ${email.subject}\nMailbox: ${email.mailbox}${attSection}\n\n${email.content}`
               : `No email found with subject "${args.subject}"`,
           );
         }
@@ -499,6 +499,7 @@ function initServer() {
               draft: args.draft as boolean | undefined,
               replyToSubject: args.replyToSubject as string | undefined,
               replyToSender: args.replyToSender as string | undefined,
+              discardDrafts: args.discardDrafts as boolean | undefined,
             },
           );
           return successResult(result!);

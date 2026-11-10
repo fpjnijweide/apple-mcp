@@ -159,7 +159,7 @@ const MAIL_SEARCH: Tool = {
 
 const MAIL_OPEN: Tool = {
   name: "mail-open",
-  description: "Get the FULL content of one email. Use subject from a previous list/search result.",
+  description: "Get the FULL content of one email, including its To and Cc recipients. Use subject from a previous list/search result.",
   inputSchema: {
     type: "object",
     properties: {
@@ -205,7 +205,7 @@ const MAIL_ACCOUNTS: Tool = {
 
 const MAIL_SEND: Tool = {
   name: "mail-send",
-  description: "Send an email, save it as a draft, or reply in an existing thread. For a reply, give replyToSubject (and optionally replyToSender); 'to' and 'subject' are then taken from the original message. A reply contains only the new body, not the quoted original.",
+  description: "Send an email, save it as a draft, or reply in an existing thread. For a reply, give replyToSubject (and optionally replyToSender); 'to' and 'subject' are then taken from the original message. A reply contains only the new body, not the quoted original. A reply to your own sent mail goes to that mail's recipients. If a Proton Bridge login is stored in the Keychain (service 'apple-mcp-proton-bridge'), mail for that account goes through Bridge: plain text, proper threading, and drafts that sync to the Proton apps; otherwise Mail's compose window is scripted.",
   inputSchema: {
     type: "object",
     properties: {
@@ -218,7 +218,8 @@ const MAIL_SEND: Tool = {
       account: { type: "string", description: "Sender as configured in Mail, e.g. 'Name <me@example.com>' (default: Mail's default account)" },
       draft: { type: "boolean", description: "Save to Drafts instead of sending (default false)" },
       replyToSubject: { type: "string", description: "Reply to the most recent received message whose subject contains this text" },
-      replyToSender: { type: "string", description: "With replyToSubject: only match messages whose sender contains this text" }
+      replyToSender: { type: "string", description: "With replyToSubject: only match messages whose sender contains this text" },
+      discardDrafts: { type: "boolean", description: "After sending, move drafts with the same subject to Trash. Use when sending a mail that was first saved with draft: true (an existing draft cannot be sent as-is)." }
     },
     required: ["body"]
   }

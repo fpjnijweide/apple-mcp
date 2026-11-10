@@ -5,6 +5,8 @@ import { promisify } from "util";
 import os from "os";
 import fs from "fs";
 
+import { bridgeLogin, sendViaBridge, type BridgeMessage } from "./mail-bridge.js";
+
 const execFileAsync = promisify(execFile);
 
 const CONFIG = {
@@ -12,6 +14,9 @@ const CONFIG = {
   MAX_CONTENT_PREVIEW: 300,
   ENVELOPE_DB: `${os.homedir()}/Library/Mail/V10/MailData/Envelope Index`,
 };
+
+// Mail stores "Re: " / "Fwd: " separately from the subject text
+const SUBJECT_SQL = "(COALESCE(m.subject_prefix, '') || s.subject)";
 
 /**
  * Run a read-only SQL query against the Mail Envelope Index.
@@ -40,6 +45,8 @@ interface EmailMessage {
   content: string;
   isRead: boolean;
   mailbox: string;
+  to?: string;
+  cc?: string;
   attachments?: EmailAttachment[];
 }
 
@@ -90,8 +97,8 @@ async function getUnreadMails(limit = 10): Promise<EmailMessage[]> {
     const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
 
     const sql = `
-SELECT s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
-       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+SELECT ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', 'localtime') as dt,
        m.read,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
        SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
@@ -159,7 +166,7 @@ async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
 
     if (searchTerm) {
       const clean = searchTerm.replace(/'/g, "''");
-      conditions.push(`(s.subject LIKE '%${clean}%' OR a.comment LIKE '%${clean}%' OR a.address LIKE '%${clean}%' OR sum2.summary LIKE '%${clean}%')`);
+      conditions.push(`(${SUBJECT_SQL} LIKE '%${clean}%' OR a.comment LIKE '%${clean}%' OR a.address LIKE '%${clean}%' OR sum2.summary LIKE '%${clean}%')`);
     }
     if (searchSender) {
       const clean = searchSender.replace(/'/g, "''");
@@ -167,7 +174,7 @@ async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
     }
     if (searchSubject) {
       const clean = searchSubject.replace(/'/g, "''");
-      conditions.push(`s.subject LIKE '%${clean}%'`);
+      conditions.push(`${SUBJECT_SQL} LIKE '%${clean}%'`);
     }
     if (searchContent) {
       const clean = searchContent.replace(/'/g, "''");
@@ -179,8 +186,8 @@ async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
     const whereClause = conditions.join(" AND ");
 
     const sql = `
-SELECT s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
-       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+SELECT ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', 'localtime') as dt,
        m.read,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
        SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
@@ -226,8 +233,8 @@ async function getLatestMails(account?: string, limit = 5): Promise<EmailMessage
     const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
 
     const sql = `
-SELECT s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
-       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+SELECT ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', 'localtime') as dt,
        m.read,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
        SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
@@ -269,6 +276,114 @@ LIMIT ${maxEmails};`;
 /**
  * Send an email
  */
+/** Locate a message's .emlx file from its Envelope Index row id and mailbox URL. */
+async function findEmlx(msgId: number, mailboxUrl: string): Promise<string> {
+  const urlPath = mailboxUrl.substring(mailboxUrl.indexOf('://') + 3);
+  const accountDir = `${os.homedir()}/Library/Mail/V10/${urlPath.substring(0, urlPath.indexOf('/'))}`;
+  try {
+    const { stdout } = await execFileAsync('find', [
+      accountDir, '-type', 'f', '(',
+      '-name', `${msgId}.partial.emlx`,
+      '-o', '-name', `${msgId}.emlx`,
+      ')',
+    ], { timeout: 5000 });
+    return stdout.trim().split('\n')[0] || '';
+  } catch {
+    return '';
+  }
+}
+
+/** The MIME source of an .emlx file: first line is its byte count, an Apple plist follows it. */
+function readEmlxMime(emlxPath: string): string {
+  const rawBuffer = fs.readFileSync(emlxPath);
+  const firstNewline = rawBuffer.indexOf(0x0A);
+  const byteCount = parseInt(rawBuffer.subarray(0, firstNewline).toString('utf-8'), 10);
+  return rawBuffer.subarray(firstNewline + 1, firstNewline + 1 + byteCount).toString('utf-8');
+}
+
+function headerOf(mime: string, name: string): string | undefined {
+  const head = mime.split(/\r?\n\r?\n/, 1)[0].replace(/\r?\n[ \t]+/g, ' ');
+  return head.match(new RegExp(`^${name}:\\s*(.*)$`, 'im'))?.[1].trim();
+}
+
+interface ReplyTarget {
+  subject: string;
+  to: string[];
+  cc: string[];
+  inReplyTo?: string;
+  references?: string;
+}
+
+/**
+ * The most recent message matching the subject (and sender), with the addressing and
+ * threading headers a reply needs. A reply to one's own sent mail goes to its recipients.
+ */
+async function findReplyTarget(subject: string, sender: string | undefined, me: string): Promise<ReplyTarget> {
+  const esc = (v: string): string => v.replace(/'/g, "''");
+  const conditions = [`${SUBJECT_SQL} LIKE '%${esc(subject)}%'`];
+  if (sender) {
+    conditions.push(`(a.comment LIKE '%${esc(sender)}%' OR a.address LIKE '%${esc(sender)}%')`);
+  }
+  const rows = queryEnvelopeDb<{
+    msg_id: number; subject: string; sender: string; mailbox_url: string;
+  }>(`
+SELECT m.ROWID as msg_id, ${SUBJECT_SQL} as subject, a.address as sender, mb.url as mailbox_url
+FROM messages m
+JOIN subjects s ON m.subject = s.ROWID
+JOIN addresses a ON m.sender = a.ROWID
+JOIN mailboxes mb ON m.mailbox = mb.ROWID
+WHERE ${conditions.join(" AND ")}
+  AND mb.url NOT LIKE 'ews://%'
+  AND mb.url NOT LIKE '%/Drafts' AND mb.url NOT LIKE '%/Trash' AND mb.url NOT LIKE '%/Spam'
+ORDER BY m.date_received DESC
+LIMIT 1;`);
+  if (rows.length === 0) throw new Error(`No message found to reply to: ${subject}`);
+  const orig = rows[0];
+
+  const emlxPath = await findEmlx(orig.msg_id, orig.mailbox_url);
+  const mime = emlxPath ? readEmlxMime(emlxPath) : "";
+  const messageId = headerOf(mime, "Message-ID");
+  const replyTo = headerOf(mime, "Reply-To")?.match(/[^\s<>,;"]+@[^\s<>,;"]+/)?.[0];
+
+  let to = [replyTo ?? orig.sender];
+  let cc: string[] = [];
+  if (orig.sender.toLowerCase() === me.toLowerCase()) {
+    const recipients = queryEnvelopeDb<{ type: number; address: string }>(`
+SELECT r.type, a.address FROM recipients r JOIN addresses a ON r.address = a.ROWID
+WHERE r.message = ${orig.msg_id} ORDER BY r.type, r.position;`);
+    to = recipients.filter((r) => r.type === 0).map((r) => r.address);
+    cc = recipients.filter((r) => r.type === 1).map((r) => r.address);
+  }
+  return {
+    subject: /^re:/i.test(orig.subject) ? orig.subject : `Re: ${orig.subject}`,
+    to,
+    cc,
+    inReplyTo: messageId,
+    references: messageId
+      ? [headerOf(mime, "References"), messageId].filter(Boolean).join(" ")
+      : undefined,
+  };
+}
+
+/** "Full Name <address>" as configured for the account in Mail, or the bare address. */
+async function senderIdentity(address: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("osascript", ["-e", `
+on run argv
+  tell application "Mail"
+    repeat with a in accounts
+      if (email addresses of a) contains (item 1 of argv) then return full name of a
+    end repeat
+  end tell
+  return ""
+end run`, address], { timeout: 10_000 });
+    const name = stdout.trim();
+    return name ? `${name} <${address}>` : address;
+  } catch {
+    return address;
+  }
+}
+
 interface SendMailOptions {
   /** Absolute paths of files to attach */
   attachments?: string[];
@@ -280,6 +395,8 @@ interface SendMailOptions {
   replyToSubject?: string;
   /** Narrow the reply target to a sender containing this text */
   replyToSender?: string;
+  /** After sending, move drafts with the same subject to Trash */
+  discardDrafts?: boolean;
 }
 
 // Arguments reach AppleScript through argv, so no user text is interpolated into the script.
@@ -295,6 +412,7 @@ on run argv
   set replySubj to item 8 of argv
   set replySender to item 9 of argv
   set asDraft to ((item 10 of argv) is "1")
+  set discardDrafts to ((item 11 of argv) is "1")
   with timeout of 300 seconds
     tell application "Mail"
       if replySubj is not "" then
@@ -361,7 +479,21 @@ on run argv
           end if
         end try
       end repeat
-      return state & linefeed & finalSubj & linefeed & finalTo
+      -- a draft saved earlier for the same mail would otherwise stay behind
+      set leftover to 0
+      try
+        set draftIds to {}
+        repeat with d in (messages of drafts mailbox whose subject is finalSubj)
+          set end of draftIds to id of d
+        end repeat
+        set leftover to count of draftIds
+        if discardDrafts then
+          repeat with i in draftIds
+            delete (first message of drafts mailbox whose id is i)
+          end repeat
+        end if
+      end try
+      return state & linefeed & finalSubj & linefeed & finalTo & linefeed & leftover
     end tell
   end timeout
 end run`;
@@ -386,6 +518,40 @@ async function sendMail(
     const missing = attachments.filter((f) => !fs.existsSync(f));
     if (missing.length) throw new Error(`Attachment not found: ${missing.join(", ")}`);
 
+    const draftNote = (drafts: number): string => !drafts ? ""
+      : opts.discardDrafts ? ` ${drafts} draft(s) with this subject moved to Trash.`
+      : ` Note: ${drafts} draft(s) with this subject remain in Drafts (pass discardDrafts to remove).`;
+    const describe = (finalSubject: string, finalTo: string): string =>
+      `"${finalSubject}" to ${finalTo}` +
+      (attachments.length ? ` with ${attachments.length} attachment(s)` : "");
+
+    // Preferred path: Proton Bridge directly. Clean body, real threading headers, synced drafts.
+    const login = await bridgeLogin();
+    if (login && (!opts.account || opts.account.toLowerCase().includes(login.user.toLowerCase()))) {
+      const list = (v?: string): string[] => splitAddresses(v).split("\n").filter(Boolean);
+      const target = isReply
+        ? await findReplyTarget(opts.replyToSubject!.trim(), opts.replyToSender?.trim(), login.user)
+        : undefined;
+      const message: BridgeMessage = {
+        from: opts.account ?? await senderIdentity(login.user),
+        to: [...(target?.to ?? []), ...list(to)],
+        cc: [...(target?.cc ?? []), ...list(cc)],
+        bcc: list(bcc),
+        subject: subject?.trim() || target!.subject,
+        text: body.trim(),
+        attachments,
+        inReplyTo: target?.inReplyTo,
+        references: target?.references,
+      };
+      if (message.to.length === 0) throw new Error("No recipient could be determined");
+      const sent = await sendViaBridge(login, message, opts);
+      const what = describe(message.subject, message.to.join(", "));
+      return sent.state === "DRAFT"
+        ? `Draft saved via Proton Bridge (syncs to the Proton apps): ${what}`
+        : `Email sent via Proton Bridge: ${what}.${draftNote(sent.leftoverDrafts)}`;
+    }
+
+    // Fallback: script Mail's compose window (Mail wraps the body in a quote block).
     const accessResult = await requestMailAccess();
     if (!accessResult.hasAccess) throw new Error(accessResult.message);
 
@@ -397,18 +563,19 @@ async function sendMail(
         "-e", SEND_SCRIPT, tmpFile, subject ?? "", splitAddresses(to), splitAddresses(cc),
         splitAddresses(bcc), attachments.join("\n"), opts.account ?? "",
         opts.replyToSubject?.trim() ?? "", opts.replyToSender?.trim() ?? "", opts.draft ? "1" : "0",
+        opts.discardDrafts ? "1" : "0",
       ], { timeout: 320_000 }));
     } finally {
       try { fs.unlinkSync(tmpFile); } catch {}
     }
 
-    const [state, finalSubject, finalTo] = stdout.trim().split("\n");
-    const what = `"${finalSubject}" to ${finalTo}` +
-      (attachments.length ? ` with ${attachments.length} attachment(s)` : "");
+    const [state, finalSubject, finalTo, leftover] = stdout.trim().split("\n");
+    const what = describe(finalSubject, finalTo);
+    const note = draftNote(Number(leftover) || 0);
     if (state === "DRAFT") return `Draft saved: ${what}`;
-    if (state === "SENT") return `Email sent and confirmed in Sent: ${what}`;
+    if (state === "SENT") return `Email sent and confirmed in Sent: ${what}.${note}`;
     if (state === "PENDING") {
-      return `Email handed to Mail but not yet visible in Sent after 20s (check the Outbox): ${what}`;
+      return `Email handed to Mail but not yet visible in Sent after 20s (check the Outbox): ${what}.${note}`;
     }
     throw new Error("Failed to send email");
   } catch (error) {
@@ -615,7 +782,7 @@ async function readMail(subject: string, sender?: string, mailbox?: string): Pro
 
     // Step 1: Find message via SQLite Envelope Index (instant)
     const cleanSubject = subject.replace(/'/g, "''");
-    const conditions: string[] = [`s.subject LIKE '%${cleanSubject}%'`];
+    const conditions: string[] = [`${SUBJECT_SQL} LIKE '%${cleanSubject}%'`];
     if (sender) {
       const cleanSender = sender.replace(/'/g, "''");
       conditions.push(`(a.comment LIKE '%${cleanSender}%' OR a.address LIKE '%${cleanSender}%')`);
@@ -626,8 +793,8 @@ async function readMail(subject: string, sender?: string, mailbox?: string): Pro
     }
 
     const sql = `
-SELECT m.ROWID as msg_id, s.subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
-       datetime(m.date_sent, 'unixepoch', '+31 years') as dt,
+SELECT m.ROWID as msg_id, ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
+       datetime(m.date_sent, 'unixepoch', 'localtime') as dt,
        m.read,
        mb.url as mailbox_url,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name
@@ -652,21 +819,16 @@ LIMIT 1;`;
     const meta = rows[0];
     const msgId = meta.msg_id;
 
-    // Step 2: Find .emlx file on disk (fast — scoped to account directory)
-    const urlPath = meta.mailbox_url.substring(meta.mailbox_url.indexOf('://') + 3);
-    const accountUuid = urlPath.substring(0, urlPath.indexOf('/'));
-    const accountDir = `${os.homedir()}/Library/Mail/V10/${accountUuid}`;
+    // Recipient types in the Envelope Index: 0 = To, 1 = Cc
+    const recipients = queryEnvelopeDb<{ type: number; addr: string }>(`
+SELECT r.type, TRIM(COALESCE(a.comment, '') || ' <' || a.address || '>') as addr
+FROM recipients r JOIN addresses a ON r.address = a.ROWID
+WHERE r.message = ${msgId} ORDER BY r.type, r.position;`);
+    const recipientsOf = (type: number): string | undefined =>
+      recipients.filter((r) => r.type === type).map((r) => r.addr).join(", ") || undefined;
 
-    let emlxPath = '';
-    try {
-      const { stdout } = await execFileAsync('find', [
-        accountDir, '-type', 'f', '(',
-        '-name', `${msgId}.partial.emlx`,
-        '-o', '-name', `${msgId}.emlx`,
-        ')',
-      ], { timeout: 5000 });
-      emlxPath = stdout.trim().split('\n')[0] || '';
-    } catch {}
+    // Step 2: Find .emlx file on disk (fast — scoped to account directory)
+    const emlxPath = await findEmlx(msgId, meta.mailbox_url);
 
     let content = '';
     const attachments: EmailAttachment[] = [];
@@ -680,16 +842,7 @@ LIMIT 1;`;
     };
 
     if (emlxPath) {
-      // .emlx format: first line is byte count, then MIME source, then Apple plist
-      const rawBuffer = fs.readFileSync(emlxPath);
-      const firstNewline = rawBuffer.indexOf(0x0A);
-      const byteCount = parseInt(
-        rawBuffer.subarray(0, firstNewline).toString('utf-8'), 10,
-      );
-      const mimeSource = rawBuffer
-        .subarray(firstNewline + 1, firstNewline + 1 + byteCount)
-        .toString('utf-8');
-      content = extractHtmlFromMime(mimeSource.trim());
+      content = extractHtmlFromMime(readEmlxMime(emlxPath).trim());
 
       // Find attachments in sibling Attachments directory
       const messagesDir = emlxPath.substring(0, emlxPath.lastIndexOf('/'));
@@ -722,6 +875,8 @@ LIMIT 1;`;
       dateSent: meta.dt || "",
       isRead: meta.read !== 0,
       mailbox: meta.mailbox_name || "Unknown",
+      to: recipientsOf(0),
+      cc: recipientsOf(1),
       content,
       attachments: attachments.length > 0 ? attachments : undefined,
     };
