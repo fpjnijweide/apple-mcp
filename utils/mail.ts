@@ -142,21 +142,63 @@ interface SearchMailsOpts {
   searchSender?: string;
   searchSubject?: string;
   searchContent?: string;
+  account?: string;
+  mailbox?: string;
   limit?: number;
 }
 
 /**
+ * SQL condition limiting results to the Mail accounts whose name contains `account`
+ * (case-insensitive). Mailbox URLs carry the account id as host (imap://<id>/INBOX).
+ * The name is matched in JS so remote input never reaches AppleScript.
+ */
+async function accountCondition(account: string): Promise<string> {
+  const out = (await runAppleScript(`
+tell application "Mail"
+  set output to ""
+  repeat with acc in every account
+    set output to output & (name of acc) & "<<<F>>>" & (id of acc) & linefeed
+  end repeat
+  return output
+end tell`)) as string;
+  const wanted = account.trim().toLowerCase();
+  const ids = out
+    .split("\n")
+    .map((line) => line.split("<<<F>>>"))
+    .filter(([name, id]) => id && name.toLowerCase().includes(wanted))
+    .map(([, id]) => id.trim().replace(/'/g, "''"));
+  if (ids.length === 0) throw new Error(`No Mail account matches "${account}".`);
+  return `(${ids.map((id) => `mb.url LIKE '%://${id}/%'`).join(" OR ")})`;
+}
+
+/** SQL condition for a mailbox name as it appears in mailbox URLs (spaces are %20). */
+function mailboxCondition(mailbox: string): string {
+  const clean = mailbox.trim().replace(/'/g, "''").replace(/ /g, "%20");
+  return `mb.url LIKE '%${clean}%'`;
+}
+
+/** SQL expression listing a message's To recipients. */
+const TO_SQL = `(SELECT group_concat(TRIM(COALESCE(ra.comment, '') || ' <' || ra.address || '>'), ', ')
+   FROM recipients r JOIN addresses ra ON r.address = ra.ROWID
+   WHERE r.message = m.ROWID AND r.type = 0)`;
+
+/**
  * Search for emails via Mail.app's Envelope Index SQLite database.
  * ~100x faster than AppleScript `whose` clauses.
- * - searchTerm: searches subject, sender, AND content (broad OR)
+ * - searchTerm: searches subject, sender, recipients AND content (broad OR)
  * - searchSender: searches sender only
  * - searchSubject: searches subject only
  * - searchContent: searches body content only
- * Multiple specific fields are combined with AND.
+ * Multiple specific fields are combined with AND. account/mailbox narrow the search; a
+ * mailbox (or account) alone lists its newest messages, e.g. mailbox "Drafts".
+ * An unknown account throws, so the caller can report it instead of "no results".
  */
 async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
+  const { searchTerm, searchSender, searchSubject, searchContent, account, mailbox } = opts;
+  const scope: string[] = [];
+  if (account) scope.push(await accountCondition(account));
+  if (mailbox) scope.push(mailboxCondition(mailbox));
   try {
-    const { searchTerm, searchSender, searchSubject, searchContent } = opts;
     const limit = opts.limit || 10;
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
     const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
@@ -166,7 +208,10 @@ async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
 
     if (searchTerm) {
       const clean = searchTerm.replace(/'/g, "''");
-      conditions.push(`(${SUBJECT_SQL} LIKE '%${clean}%' OR a.comment LIKE '%${clean}%' OR a.address LIKE '%${clean}%' OR sum2.summary LIKE '%${clean}%')`);
+      // Recipients matter for drafts and sent mail, where the sender is always the user.
+      conditions.push(`(${SUBJECT_SQL} LIKE '%${clean}%' OR a.comment LIKE '%${clean}%' OR a.address LIKE '%${clean}%' OR sum2.summary LIKE '%${clean}%'
+        OR EXISTS (SELECT 1 FROM recipients r JOIN addresses ra ON r.address = ra.ROWID
+                   WHERE r.message = m.ROWID AND (ra.comment LIKE '%${clean}%' OR ra.address LIKE '%${clean}%')))`);
     }
     if (searchSender) {
       const clean = searchSender.replace(/'/g, "''");
@@ -181,16 +226,17 @@ async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
       conditions.push(`sum2.summary LIKE '%${clean}%'`);
     }
 
-    if (conditions.length === 0) return [];
+    if (conditions.length === 0 && scope.length === 0) return [];
 
-    const whereClause = conditions.join(" AND ");
+    const whereClause = [...conditions, ...scope].join(" AND ");
 
     const sql = `
 SELECT ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address || '>' as sender,
        datetime(m.date_sent, 'unixepoch', 'localtime') as dt,
        m.read,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
-       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
+       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview,
+       ${TO_SQL} as to_list
 FROM messages m
 JOIN subjects s ON m.subject = s.ROWID
 JOIN addresses a ON m.sender = a.ROWID
@@ -205,7 +251,7 @@ LIMIT ${maxEmails};`;
 
     const rows = queryEnvelopeDb<{
       subject: string; sender: string; dt: string;
-      read: number; mailbox_name: string; preview: string;
+      read: number; mailbox_name: string; preview: string; to_list: string | null;
     }>(sql);
 
     return rows.map(row => ({
@@ -215,6 +261,7 @@ LIMIT ${maxEmails};`;
       isRead: row.read !== 0,
       mailbox: row.mailbox_name || "Unknown",
       content: row.preview || "",
+      to: row.to_list || undefined,
     }));
   } catch (error) {
     console.error(
@@ -228,6 +275,7 @@ LIMIT ${maxEmails};`;
  * Get latest emails (regardless of read status) via Envelope Index SQLite database.
  */
 async function getLatestMails(account?: string, limit = 5): Promise<EmailMessage[]> {
+  const scope = account ? `\n  AND ${await accountCondition(account)}` : "";
   try {
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
     const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
@@ -248,7 +296,7 @@ WHERE mb.url NOT LIKE 'ews://%'
   AND mb.url NOT LIKE '%/Alle%20e-mail'
   AND mb.url NOT LIKE '%/Spam'
   AND mb.url NOT LIKE '%/Trash'
-  AND mb.url NOT LIKE '%/Drafts'
+  AND mb.url NOT LIKE '%/Drafts'${scope}
 ORDER BY m.date_sent DESC
 LIMIT ${maxEmails};`;
 

@@ -405,23 +405,28 @@ function initServer() {
         case "mail-search": {
           const mod = await loadModule("mail");
           const searchDesc = (args.searchTerm || args.searchSender || args.searchSubject || args.searchContent || "") as string;
+          if (!searchDesc && !args.mailbox && !args.account) {
+            return errorResult("Give a search term, or a mailbox (e.g. Drafts) or account to list.");
+          }
           const emails = await mod.searchMails({
             searchTerm: args.searchTerm as string | undefined,
             searchSender: args.searchSender as string | undefined,
             searchSubject: args.searchSubject as string | undefined,
             searchContent: args.searchContent as string | undefined,
+            account: args.account as string | undefined,
+            mailbox: args.mailbox as string | undefined,
             limit: args.limit as number | undefined,
           });
           return successResult(
             emails.length > 0
-              ? `Found ${emails.length} email(s) for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
+              ? `Found ${emails.length} email(s)${searchDesc ? ` for "${searchDesc}"` : ""}${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` ${searchDesc || args.account ? "and" : "in"} mailbox "${args.mailbox}"` : ""}:\n\n` +
                 emails
                   .map(
                     (email: any) =>
-                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
+                      `[${email.dateSent}] From: ${email.sender}\n${email.to ? `To: ${email.to}\n` : ""}Mailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
                   )
                   .join("\n\n")
-              : `No emails found for "${searchDesc}"${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
+              : `No emails found${searchDesc ? ` for "${searchDesc}"` : ""}${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` ${searchDesc || args.account ? "and" : "in"} mailbox "${args.mailbox}"` : ""}`,
           );
         }
 

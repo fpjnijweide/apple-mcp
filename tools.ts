@@ -142,16 +142,16 @@ const MAIL_UNREAD: Tool = {
 
 const MAIL_SEARCH: Tool = {
   name: "mail-search",
-  description: "Search emails by keyword with short previews. Use searchTerm for broad searches, or searchSender/searchSubject/searchContent for precise filtering.",
+  description: "Search emails by keyword with short previews. Use searchTerm for broad searches (it also matches recipients, so it finds drafts and sent mail by who they are to), or searchSender/searchSubject/searchContent for precise filtering. With only a mailbox, lists that mailbox's newest messages, e.g. mailbox \"Drafts\" to see all drafts.",
   inputSchema: {
     type: "object",
     properties: {
-      searchTerm: { type: "string", description: "General search across subject, sender, AND body content" },
+      searchTerm: { type: "string", description: "General search across subject, sender, recipients AND body content" },
       searchSender: { type: "string", description: "Search by sender name or email address only" },
       searchSubject: { type: "string", description: "Search by subject line only" },
       searchContent: { type: "string", description: "Search by email body content only" },
-      account: { type: "string", description: "Email account to filter by" },
-      mailbox: { type: "string", description: "Mailbox to filter by" },
+      account: { type: "string", description: "Account to filter by: its name or part of it, e.g. protonmail" },
+      mailbox: { type: "string", description: "Mailbox to filter by, e.g. Drafts, Sent, INBOX. Without search terms, lists its newest messages." },
       limit: { type: "number", description: "Number of emails to retrieve" }
     }
   }
