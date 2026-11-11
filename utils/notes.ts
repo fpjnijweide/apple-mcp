@@ -163,48 +163,42 @@ async function findNote(searchText: string): Promise<Note[]> {
 			return [];
 		}
 
-		const searchTerm = searchText.toLowerCase();
+		// Escape for an AppleScript string literal: the search text arrives from remote MCP clients.
+		const searchTerm = searchText.toLowerCase().replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
+		// Let Notes filter with "whose" (one Apple Event each, case-insensitive) instead of fetching
+		// every note's body in a loop, which took ~100s for ~500 notes and hit Cloudflare's timeout.
 		const script = `
 tell application "Notes"
+    set searchTerm to "${searchTerm}"
     set titleMatches to {}
     set contentMatches to {}
+    set seenIds to {}
     set noteCount to 0
-    set searchTerm to "${searchTerm}"
 
-    -- Get all notes and search through them
-    set allNotes to notes
+    -- Materialize each "whose" result once; iterating the reference directly re-runs the query per item.
+    set titleNotes to (notes whose name contains searchTerm)
+    set bodyNotes to (notes whose body contains searchTerm)
 
-    repeat with i from 1 to (count of allNotes)
+    repeat with currentNote in titleNotes
         if noteCount >= ${CONFIG.MAX_NOTES} then exit repeat
-
         try
-            set currentNote to item i of allNotes
-            set noteName to name of currentNote
-            set noteContent to body of currentNote
-            
-            -- Debug: log note info
-            log "Note: " & noteName & " - Content length: " & (length of noteContent)
-
-            -- Check for title matches first (higher priority)
-            if noteName contains searchTerm then
-                -- Return full content for title matches (no truncation)
-                set noteInfo to {name:noteName, content:noteContent, priority:"title"}
-                set titleMatches to titleMatches & {noteInfo}
-                set noteCount to noteCount + 1
-            -- Then check for content matches (lower priority)
-            else if noteContent contains searchTerm then
-                -- Return full content for content matches (no truncation)
-                set noteInfo to {name:noteName, content:noteContent, priority:"content"}
-                set contentMatches to contentMatches & {noteInfo}
-                set noteCount to noteCount + 1
-            end if
-        on error
-            -- Skip problematic notes
+            set end of titleMatches to {name:name of currentNote, content:body of currentNote, priority:"title"}
+            set end of seenIds to id of currentNote
+            set noteCount to noteCount + 1
         end try
     end repeat
 
-    -- Return title matches first, then content matches
+    repeat with currentNote in bodyNotes
+        if noteCount >= ${CONFIG.MAX_NOTES} then exit repeat
+        try
+            if seenIds does not contain (id of currentNote) then
+                set end of contentMatches to {name:name of currentNote, content:body of currentNote, priority:"content"}
+                set noteCount to noteCount + 1
+            end if
+        end try
+    end repeat
+
     return titleMatches & contentMatches
 end tell`;
 
