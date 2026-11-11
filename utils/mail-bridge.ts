@@ -90,22 +90,28 @@ async function withImap<T>(login: BridgeLogin, fn: (c: ImapFlow) => Promise<T>):
   }
 }
 
-/** Counts drafts with exactly this subject and optionally deletes them. */
-async function matchingDrafts(
-  login: BridgeLogin,
-  subject: string,
-  discard: boolean,
-): Promise<number> {
+/** UIDs of the drafts whose subject is exactly this one. */
+async function draftUids(login: BridgeLogin, subject: string): Promise<number[]> {
   return withImap(login, async (client) => {
     const lock = await client.getMailboxLock("Drafts");
     try {
-      if (!client.mailbox || client.mailbox.exists === 0) return 0;
       const uids: number[] = [];
+      if (!client.mailbox || client.mailbox.exists === 0) return uids;
       for await (const msg of client.fetch("1:*", { envelope: true, uid: true })) {
         if (msg.envelope?.subject === subject) uids.push(msg.uid);
       }
-      if (discard && uids.length) await client.messageDelete(uids, { uid: true });
-      return uids.length;
+      return uids;
+    } finally {
+      lock.release();
+    }
+  });
+}
+
+async function deleteDrafts(login: BridgeLogin, uids: number[]): Promise<void> {
+  await withImap(login, async (client) => {
+    const lock = await client.getMailboxLock("Drafts");
+    try {
+      await client.messageDelete(uids, { uid: true });
     } finally {
       lock.release();
     }
@@ -153,11 +159,14 @@ export async function sendViaBridge(
   }
 
   const transport = await smtpTransport(login);
+  // Snapshot before sending: while a message is in flight, Bridge keeps its own copy in
+  // Drafts, which must be neither counted nor deleted.
+  const earlierDrafts = await draftUids(login, message.subject).catch(() => []);
   // Resolves only once Bridge has accepted the message for delivery.
   await transport.sendMail(mailOptions(message));
   // The mail is out; a failure while tidying drafts must not look like a failed send.
-  const leftoverDrafts = await matchingDrafts(
-    login, message.subject, !!opts.discardDrafts,
-  ).catch(() => 0);
-  return { state: "SENT", leftoverDrafts };
+  if (opts.discardDrafts && earlierDrafts.length) {
+    await deleteDrafts(login, earlierDrafts).catch(() => {});
+  }
+  return { state: "SENT", leftoverDrafts: earlierDrafts.length };
 }
