@@ -1,8 +1,9 @@
 import { runAppleScript } from 'run-applescript';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Define types for our calendar events
 interface CalendarEvent {
@@ -252,30 +253,20 @@ async function getDisabledCalendarNames(): Promise<string[]> {
 }
 
 /**
- * Run cal-helper via the .app bundle. Tries direct execution first (works from
- * Terminal), then falls back to `open -W` with a temp file (needed for Claude
- * Desktop where the parent process lacks Calendar TCC).
+ * Run cal-helper via the .app bundle and return its raw output. Tries direct execution first
+ * (works from Terminal), then falls back to `open -W` with a temp file (needed for Claude
+ * Desktop where the parent process lacks Calendar TCC). Uses execFile, not a shell, because
+ * arguments such as event IDs arrive from remote MCP clients.
  */
-async function runCalHelper(
-  fromDate: string,
-  toDate: string,
-  limit: number
-): Promise<CalendarEvent[]> {
-  const maxEvents = Math.min(limit, CONFIG.MAX_EVENTS);
-
-  const disabled = await getDisabledCalendarNames();
-  const excludeArg = disabled.length > 0 ? `"${disabled.join(',')}"` : '';
-
-  const baseArgs = ['events', fromDate, toDate, String(maxEvents), excludeArg].filter(Boolean);
-
-  // Try direct execution first (fast, works from Terminal)
+async function execCalHelper(args: string[]): Promise<string> {
   try {
-    const directCmd = [`"${CAL_HELPER_BIN}"`, ...baseArgs].join(' ');
-    const { stdout, stderr } = await execAsync(directCmd, { timeout: CONFIG.TIMEOUT_MS });
+    const { stdout, stderr } = await execFileAsync(CAL_HELPER_BIN, args, {
+      timeout: CONFIG.TIMEOUT_MS,
+    });
     if (stderr && stderr.includes('denied')) {
       throw new Error('access_denied');
     }
-    return parseIcalBuddyOutput(stdout);
+    return stdout;
   } catch (error: any) {
     if (error.code === 'ENOENT') {
       throw new Error(
@@ -291,20 +282,33 @@ async function runCalHelper(
 
   // Fallback: launch as .app via `open -W` so it becomes its own responsible process
   const tmpFile = `/tmp/cal-helper-${Date.now()}.txt`;
-  const openArgs = ['--output', tmpFile, ...baseArgs];
-  const openCmd = `open -W -g "${CAL_HELPER_APP}" --args ${openArgs.join(' ')}`;
-
   try {
-    await execAsync(openCmd, { timeout: CONFIG.TIMEOUT_MS });
+    await execFileAsync(
+      'open',
+      ['-W', '-g', CAL_HELPER_APP, '--args', '--output', tmpFile, ...args],
+      { timeout: CONFIG.TIMEOUT_MS }
+    );
     const { readFile, unlink } = await import('fs/promises');
     const output = await readFile(tmpFile, 'utf-8');
     await unlink(tmpFile).catch(() => {});
-    return parseIcalBuddyOutput(output);
+    return output;
   } catch (error: any) {
     throw new Error(
       'Calendar access denied. Go to System Settings > Privacy & Security > Calendars and enable access for CalHelper.'
     );
   }
+}
+
+async function runCalHelper(
+  fromDate: string,
+  toDate: string,
+  limit: number
+): Promise<CalendarEvent[]> {
+  const maxEvents = Math.min(limit, CONFIG.MAX_EVENTS);
+  const disabled = await getDisabledCalendarNames();
+  const args = ['events', fromDate, toDate, String(maxEvents)];
+  if (disabled.length > 0) args.push(disabled.join(','));
+  return parseIcalBuddyOutput(await execCalHelper(args));
 }
 
 /**
@@ -523,11 +527,50 @@ end tell`;
   }
 }
 
+/**
+ * Delete one occurrence of an event (or it and all later ones) by ID and exact start.
+ * Recurring occurrences share one ID, so the start selects which occurrence is meant.
+ */
+async function deleteEvent(
+  eventId: string,
+  occurrence: string,
+  span: 'this' | 'future' = 'this'
+): Promise<{ success: boolean; message: string }> {
+  if (!eventId) return { success: false, message: 'Event ID is required' };
+  if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/.test(occurrence || '')) {
+    return {
+      success: false,
+      message: 'occurrence must be the event start as YYYY-MM-DDTHH:mm:ss (or YYYY-MM-DD for all-day)',
+    };
+  }
+  if (span !== 'this' && span !== 'future') {
+    return { success: false, message: "span must be 'this' or 'future'" };
+  }
+  try {
+    const out = (await execCalHelper(['delete', eventId, occurrence, span])).trim();
+    const [status, ...fields] = out.split('<<<F>>>');
+    if (status === 'OK') {
+      const [title, when, calendarName, scope] = fields;
+      return {
+        success: true,
+        message: `Deleted "${title}" (${when}) from calendar "${calendarName}": ${scope}.`,
+      };
+    }
+    return { success: false, message: fields.join(' ') || out || 'Unknown cal-helper error' };
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 const calendar = {
   searchEvents,
   openEvent,
   getEvents,
   createEvent,
+  deleteEvent,
   requestCalendarAccess,
 };
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFileSync, writeFileSync } from "fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -206,6 +207,14 @@ function initServer() {
       },
     },
   );
+
+  // --- Reddit helpers (cookie-based; see reddit-fetch / reddit-set-cookie) ---
+  const REDDIT_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
+  // accept either "reddit_session=<token>" or a bare "<token>" pasted from DevTools
+  const redditCookie = (raw: string) => { raw = raw.trim(); return raw.includes("=") ? raw : `reddit_session=${raw}`; };
+  const redditGet = (cookie: string, path: string) =>
+    fetch(`https://old.reddit.com${path}`, { headers: { cookie, "user-agent": REDDIT_UA, accept: "application/json" } });
+  const redditRejected = (res: Response) => res.status === 403 || res.url.includes("/login");
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     console.error("DEBUG: Available tools:", tools.map(t => t.name));
@@ -616,7 +625,8 @@ function initServer() {
                       `${event.title} (${new Date(event.startDate!).toLocaleString()} - ${new Date(event.endDate!).toLocaleString()})\n` +
                       `Location: ${event.location || "Not specified"}\n` +
                       `Calendar: ${event.calendarName}\n` +
-                      `ID: ${event.id}`,
+                      `ID: ${event.id}\n` +
+                      `Occurrence: ${event.startDate}`,
                   )
                   .join("\n\n")}`
               : `No events found from ${startDateText} to ${endDateText}.`,
@@ -641,6 +651,7 @@ function initServer() {
                       `Location: ${event.location || "Not specified"}\n` +
                       `Calendar: ${event.calendarName}\n` +
                       `ID: ${event.id}\n` +
+                      `Occurrence: ${event.startDate}\n` +
                       `${event.notes ? `Notes: ${event.notes}\n` : ""}`,
                   )
                   .join("\n\n")}`
@@ -676,6 +687,21 @@ function initServer() {
                 `${result.message} Event scheduled from ${new Date(args.startDate as string).toLocaleString()} to ${new Date(args.endDate as string).toLocaleString()}${result.eventId ? `\nEvent ID: ${result.eventId}` : ""}`,
               )
             : errorResult(`Error creating event: ${result.message}`);
+        }
+
+        case "calendar-delete": {
+          const mod = await loadModule("calendar");
+          if (!args.eventId || !args.occurrence) {
+            return errorResult("eventId and occurrence are required (both from calendar-list or calendar-search).");
+          }
+          const result = await mod.deleteEvent(
+            args.eventId as string,
+            args.occurrence as string,
+            (args.span as "this" | "future" | undefined) ?? "this",
+          );
+          return result.success
+            ? successResult(result.message)
+            : errorResult(`Error deleting event: ${result.message}`);
         }
 
         // ==================== Maps ====================
@@ -764,6 +790,57 @@ function initServer() {
           return result.success
             ? successResult(result.message)
             : errorResult(result.message);
+        }
+
+        case "reddit-fetch": {
+          // ponytail: re-read .env on every call so a pasted-in fresh cookie works without restarting start.sh
+          const envFile = process.env.MCP_TUNNEL_ENV;
+          const raw = (envFile && readFileSync(envFile, "utf-8").match(/^REDDIT_COOKIE=(.+)$/m)?.[1]) || process.env.REDDIT_COOKIE;
+          if (!raw) return errorResult("REDDIT_COOKIE not set.");
+          let path = String(args.path ?? "");
+          if (!path.startsWith("/")) return errorResult("path must start with /");
+          if (!/\.json(\?|$)/.test(path)) path = path.replace(/\/?(\?|$)/, ".json$1");
+          // ponytail: Reddit's edge 403s these URL patterns for this access path; fail fast instead of hammering it. Drop if Reddit lifts it.
+          const BLOCKED_HINT = "Reddit blocks /search, /hot, /new and /rising here. Instead: /r/<sub>?limit=N for hot, /r/<sub>/top?t=day|week|month|year for top, /r/<sub>/controversial, /?limit=N for the front page, /r/<sub>/comments/<id> for a thread, /user/<name>/submitted. To find threads on a topic, use web search with 'site:reddit.com <topic>' and then fetch the thread's /r/<sub>/comments/<id> path.";
+          if (/\/(search|hot|new|rising)\.json/.test(path)) return errorResult(BLOCKED_HINT);
+          const res = await redditGet(redditCookie(raw), path);
+          if (redditRejected(res)) {
+            // 403 is ambiguous: dead cookie, or Reddit's edge blocking this URL pattern. One probe tells them apart.
+            const me = res.status === 403 ? await redditGet(redditCookie(raw), "/api/me.json") : null;
+            if (me?.ok) return errorResult(`Reddit blocked this endpoint (HTTP 403 "network security" page) although the login cookie is valid. ${BLOCKED_HINT}`);
+            return errorResult("Reddit rejected the login cookie (HTTP " + res.status + "): refresh it with reddit-set-cookie or update REDDIT_COOKIE in .env.");
+          }
+          if (!res.ok) return errorResult(`Reddit returned HTTP ${res.status}`);
+          // ponytail: keep only the fields Claude needs; pass raw if trimming ever loses something important
+          const KEEP = new Set(["id","title","author","score","num_comments","permalink","url","selftext","body","created_utc","subreddit","link_flair_text","over_18","after","subscribers","public_description","display_name"]);
+          const trim = (v: any): any => {
+            if (Array.isArray(v)) return v.map(trim);
+            if (v && typeof v === "object") {
+              if ("kind" in v && "data" in v) v = v.data;
+              const out: any = {};
+              for (const [k, val] of Object.entries(v)) {
+                if (k === "children" || k === "replies") { if (val && typeof val === "object") out[k] = trim(val); }
+                else if (KEEP.has(k) && val !== null && val !== "") out[k] = typeof val === "string" && val.length > 4000 ? val.slice(0, 4000) + "…" : val;
+              }
+              return out;
+            }
+            return v;
+          };
+          return successResult(JSON.stringify(trim(await res.json())));
+        }
+
+        case "reddit-set-cookie": {
+          const envFile = process.env.MCP_TUNNEL_ENV;
+          if (!envFile) return errorResult("MCP_TUNNEL_ENV not set; cannot persist the cookie.");
+          const cookie = redditCookie(String(args.cookie ?? ""));
+          if (!/^reddit_session=[A-Za-z0-9%._~-]+$/.test(cookie)) return errorResult("Expected the reddit_session cookie value (letters, digits, % . _ - ~ only).");
+          const res = await redditGet(cookie, "/api/me.json");
+          if (redditRejected(res) || !res.ok) return errorResult(`Reddit rejected this cookie (HTTP ${res.status}); .env left unchanged.`);
+          const me: any = await res.json();
+          const line = `REDDIT_COOKIE=${cookie}`;
+          const env = readFileSync(envFile, "utf-8");
+          writeFileSync(envFile, /^REDDIT_COOKIE=.*$/m.test(env) ? env.replace(/^REDDIT_COOKIE=.*$/m, line) : env.replace(/\n?$/, `\n${line}\n`));
+          return successResult(`Cookie saved; logged in as u/${me?.data?.name ?? "?"}.`);
         }
 
         default:

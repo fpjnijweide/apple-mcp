@@ -62,6 +62,7 @@ func writeOutput(_ text: String) {
 if filteredArgs.count < 2 {
     FileHandle.standardError.write("Usage: cal-helper [--output file] events <from> <to> <limit> [excludeCals]\n".data(using: .utf8)!)
     FileHandle.standardError.write("       cal-helper [--output file] calendars\n".data(using: .utf8)!)
+    FileHandle.standardError.write("       cal-helper [--output file] delete <eventId> <occurrenceStart> <this|future>\n".data(using: .utf8)!)
     exit(1)
 }
 
@@ -151,6 +152,60 @@ case "events":
     }
 
     writeOutput(output)
+
+case "delete":
+    // delete <eventIdentifier> <occurrenceStart> <this|future>
+    // occurrenceStart is the start exactly as `events` prints it (yyyy-MM-dd'T'HH:mm:ss, or yyyy-MM-dd
+    // for all-day). Recurring occurrences share one eventIdentifier, so the start picks the occurrence.
+    // Outcomes go through writeOutput as OK/ERROR records and exit 0, so the `open -W --output`
+    // fallback can read them too. Exit 1 stays reserved for usage and access errors.
+    guard filteredArgs.count >= 5 else {
+        FileHandle.standardError.write("Usage: cal-helper delete <eventId> <occurrenceStart> <this|future>\n".data(using: .utf8)!)
+        exit(1)
+    }
+    let eventId = filteredArgs[2]
+    let start = filteredArgs[3]
+    let spanArg = filteredArgs[4]
+
+    func fail(_ msg: String) -> Never {
+        writeOutput("ERROR\(FIELD_SEP)\(msg)")
+        exit(0)
+    }
+
+    guard spanArg == "this" || spanArg == "future" else { fail("span must be 'this' or 'future'") }
+
+    let dayFormat = DateFormatter()
+    dayFormat.dateFormat = "yyyy-MM-dd"
+    guard start.count >= 10, let dayStart = dayFormat.date(from: String(start.prefix(10))) else {
+        fail("occurrence must be YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss")
+    }
+    let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart)!
+
+    let predicate = store.predicateForEvents(withStart: dayStart, end: dayEnd, calendars: nil)
+    let matches = store.events(matching: predicate).filter { ev in
+        ev.eventIdentifier == eventId &&
+            (formatDate(ev.startDate) == start || (ev.isAllDay && formatDateOnly(ev.startDate) == start))
+    }
+    guard let ev = matches.first else {
+        fail("No event with that ID starts at \(start). Take ID and Occurrence from calendar-list or calendar-search.")
+    }
+    guard matches.count == 1 else { fail("\(matches.count) events match that ID and start; refusing to delete.") }
+    guard ev.calendar.allowsContentModifications else {
+        fail("Calendar \"\(ev.calendar.title)\" is read-only; this event cannot be deleted.")
+    }
+
+    let title = ev.title ?? "Untitled"
+    let when = ev.isAllDay ? formatDateOnly(ev.startDate) : "\(formatDate(ev.startDate)) - \(formatDate(ev.endDate))"
+    let calName = ev.calendar.title
+    let scope = !ev.hasRecurrenceRules ? "single event"
+        : spanArg == "future" ? "this and all future occurrences" : "this occurrence only"
+
+    do {
+        try store.remove(ev, span: spanArg == "future" ? .futureEvents : .thisEvent, commit: true)
+    } catch {
+        fail("Delete failed: \(error.localizedDescription)")
+    }
+    writeOutput("OK\(FIELD_SEP)\(title)\(FIELD_SEP)\(when)\(FIELD_SEP)\(calName)\(FIELD_SEP)\(scope)")
 
 default:
     FileHandle.standardError.write("Unknown command: \(command)\n".data(using: .utf8)!)

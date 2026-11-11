@@ -348,6 +348,20 @@ const CALENDAR_CREATE: Tool = {
   }
 };
 
+const CALENDAR_DELETE: Tool = {
+  name: "calendar-delete",
+  description: "Delete a calendar event. Take eventId (the ID line) and occurrence (the Occurrence line) from calendar-list or calendar-search; together they must match exactly one event. For recurring events, span 'this' (default) deletes only that occurrence and 'future' deletes it and every later one. Cannot be undone, and events in synced calendars (iCloud, Google, Proton) are deleted on the server too, so confirm the exact event with the user before calling.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      eventId: { type: "string", description: "Event ID from calendar-list or calendar-search" },
+      occurrence: { type: "string", description: "Occurrence start from calendar-list or calendar-search, e.g. 2026-11-12T10:00:00, or 2026-11-12 for all-day events" },
+      span: { type: "string", enum: ["this", "future"], description: "'this' = only this occurrence (default); 'future' = this and all later occurrences" }
+    },
+    required: ["eventId", "occurrence"]
+  }
+};
+
 // --- Maps ---
 
 const MAPS_SEARCH: Tool = {
@@ -437,6 +451,32 @@ const MAPS_CREATE_GUIDE: Tool = {
   }
 };
 
+// --- Reddit ---
+
+const REDDIT_FETCH: Tool = {
+  name: "reddit-fetch",
+  description: "Fetch a Reddit JSON endpoint via old.reddit.com using the configured login cookie. Supported paths: /r/<sub>?limit=N (hot listing), /r/<sub>/top?t=day|week|month|year&limit=N, /r/<sub>/controversial, /?limit=N (front page), /r/<sub>/comments/<id>?limit=N (post + comments), /r/<sub>/about, /user/<name>/submitted, /message/inbox, /subreddits/mine. NOT available: /search, /hot, /new, /rising (Reddit blocks them). To find threads about a topic, use web search with 'site:reddit.com <topic>' first, then fetch the thread's /r/<sub>/comments/<id> path here. .json is appended automatically; the response is trimmed to essential fields.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Reddit path starting with /, .json appended if missing" }
+    },
+    required: ["path"]
+  }
+};
+
+const REDDIT_SET_COOKIE: Tool = {
+  name: "reddit-set-cookie",
+  description: "Store a fresh Reddit login cookie for reddit-fetch. Use when reddit-fetch reports the cookie was rejected. Pass the reddit_session cookie value copied from a logged-in desktop browser (DevTools → Application → Cookies → reddit.com). The cookie is verified against Reddit before being saved.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      cookie: { type: "string", description: "reddit_session cookie value, with or without the 'reddit_session=' prefix" }
+    },
+    required: ["cookie"]
+  }
+};
+
 const tools = [
   // Contacts
   CONTACTS_SEARCH, CONTACTS_EDIT, CONTACTS_DELETE,
@@ -449,9 +489,11 @@ const tools = [
   // Reminders
   REMINDERS_LIST, REMINDERS_SEARCH, REMINDERS_LIST_BY_ID, REMINDERS_OPEN, REMINDERS_CREATE,
   // Calendar
-  CALENDAR_LIST, CALENDAR_SEARCH, CALENDAR_OPEN, CALENDAR_CREATE,
+  CALENDAR_LIST, CALENDAR_SEARCH, CALENDAR_OPEN, CALENDAR_CREATE, CALENDAR_DELETE,
   // Maps
   MAPS_SEARCH, MAPS_DIRECTIONS, MAPS_LIST_GUIDES, MAPS_SAVE, MAPS_PIN, MAPS_ADD_TO_GUIDE, MAPS_CREATE_GUIDE,
+  REDDIT_FETCH,
+  REDDIT_SET_COOKIE,
 ];
 
 export default tools;
