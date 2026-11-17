@@ -135,6 +135,7 @@ const MAIL_UNREAD: Tool = {
     properties: {
       account: { type: "string", description: "Email account to filter by" },
       mailbox: { type: "string", description: "Mailbox to filter by" },
+      category: { type: "string", enum: ["primary", "transactions", "updates", "promotions"], description: "Apple Mail inbox category: primary (people, important), transactions (receipts, orders, statements), updates (newsletters, notices), promotions (marketing)" },
       limit: { type: "number", description: "Number of emails to retrieve (default 10)" }
     }
   }
@@ -142,7 +143,7 @@ const MAIL_UNREAD: Tool = {
 
 const MAIL_SEARCH: Tool = {
   name: "mail-search",
-  description: "Search emails by keyword with short previews. Use searchTerm for broad searches (it also matches recipients, so it finds drafts and sent mail by who they are to), or searchSender/searchSubject/searchContent for precise filtering. With only a mailbox, lists that mailbox's newest messages, e.g. mailbox \"Drafts\" to see all drafts.",
+  description: "Search emails by keyword with short previews. Use searchTerm for broad searches (it also matches recipients, so it finds drafts and sent mail by who they are to), or searchSender/searchSubject/searchContent for precise filtering. With only a mailbox, lists that mailbox's newest messages, e.g. mailbox \"Drafts\" to see all drafts. Each result shows its category (primary, transactions, updates, promotions); filter with category, e.g. category \"primary\" for what needs attention.",
   inputSchema: {
     type: "object",
     properties: {
@@ -152,6 +153,7 @@ const MAIL_SEARCH: Tool = {
       searchContent: { type: "string", description: "Search by email body content only" },
       account: { type: "string", description: "Account to filter by: its name or part of it, e.g. protonmail" },
       mailbox: { type: "string", description: "Mailbox to filter by, e.g. Drafts, Sent, INBOX. Without search terms, lists its newest messages." },
+      category: { type: "string", enum: ["primary", "transactions", "updates", "promotions"], description: "Apple Mail inbox category: primary (people, important), transactions (receipts, orders, statements), updates (newsletters, notices), promotions (marketing)" },
       limit: { type: "number", description: "Number of emails to retrieve" }
     }
   }
@@ -178,6 +180,7 @@ const MAIL_LATEST: Tool = {
     type: "object",
     properties: {
       account: { type: "string", description: "Email account to filter by" },
+      category: { type: "string", enum: ["primary", "transactions", "updates", "promotions"], description: "Apple Mail inbox category: primary (people, important), transactions (receipts, orders, statements), updates (newsletters, notices), promotions (marketing)" },
       limit: { type: "number", description: "Number of emails to retrieve (default 5)" }
     }
   }

@@ -379,23 +379,18 @@ function initServer() {
 
         case "mail-unread": {
           const mod = await loadModule("mail");
-          let emails;
-          if (args.account) {
-            emails = await mod.getUnreadMailsForAccount(
-              args.account as string,
-              args.mailbox as string | undefined,
-              args.limit as number | undefined,
-            );
-          } else {
-            emails = await mod.getUnreadMails(args.limit as number | undefined);
-          }
+          const emails = await mod.getUnreadMails(args.limit as number | undefined, {
+            account: args.account as string | undefined,
+            mailbox: args.mailbox as string | undefined,
+            category: args.category as string | undefined,
+          });
           return successResult(
             emails.length > 0
               ? `Found ${emails.length} unread email(s)${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}:\n\n` +
                 emails
                   .map(
                     (email: any) =>
-                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
+                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\n${email.category ? `Category: ${email.category}\n` : ""}Subject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
                   )
                   .join("\n\n")
               : `No unread emails found${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` and mailbox "${args.mailbox}"` : ""}`,
@@ -415,6 +410,7 @@ function initServer() {
             searchContent: args.searchContent as string | undefined,
             account: args.account as string | undefined,
             mailbox: args.mailbox as string | undefined,
+            category: args.category as string | undefined,
             limit: args.limit as number | undefined,
           });
           return successResult(
@@ -423,7 +419,7 @@ function initServer() {
                 emails
                   .map(
                     (email: any) =>
-                      `[${email.dateSent}] From: ${email.sender}\n${email.to ? `To: ${email.to}\n` : ""}Mailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
+                      `[${email.dateSent}] From: ${email.sender}\n${email.to ? `To: ${email.to}\n` : ""}Mailbox: ${email.mailbox}\n${email.category ? `Category: ${email.category}\n` : ""}Subject: ${email.subject}\n${email.content.substring(0, 200)}${email.content.length > 200 ? "..." : ""}`,
                   )
                   .join("\n\n")
               : `No emails found${searchDesc ? ` for "${searchDesc}"` : ""}${args.account ? ` in account "${args.account}"` : ""}${args.mailbox ? ` ${searchDesc || args.account ? "and" : "in"} mailbox "${args.mailbox}"` : ""}`,
@@ -454,14 +450,18 @@ function initServer() {
         case "mail-latest": {
           const mod = await loadModule("mail");
           const account = (args.account as string) || undefined;
-          const emails = await mod.getLatestMails(account, args.limit as number | undefined);
+          const emails = await mod.getLatestMails(
+            account,
+            args.limit as number | undefined,
+            args.category as string | undefined,
+          );
           return successResult(
             emails.length > 0
               ? `Found ${emails.length} latest email(s)${account ? ` in account "${account}"` : ""}:\n\n` +
                 emails
                   .map(
                     (email: any) =>
-                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\nSubject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
+                      `[${email.dateSent}] From: ${email.sender}\nMailbox: ${email.mailbox}\n${email.category ? `Category: ${email.category}\n` : ""}Subject: ${email.subject}\n${email.content.substring(0, 500)}${email.content.length > 500 ? "..." : ""}`,
                   )
                   .join("\n\n")
               : `No latest emails found${account ? ` in account "${account}"` : ""}`,

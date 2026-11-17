@@ -18,12 +18,29 @@ const CONFIG = {
 // Mail stores "Re: " / "Fwd: " separately from the subject text
 const SUBJECT_SQL = "(COALESCE(m.subject_prefix, '') || s.subject)";
 
+/** macOS refused to let this process read the Mail database (missing Full Disk Access). */
+class MailAccessError extends Error {
+  constructor() {
+    super("macOS denied access to the Mail database. Grant Full Disk Access to the program running " +
+      "this server (System Settings > Privacy & Security > Full Disk Access), then restart it.");
+  }
+}
+
 /**
  * Run a read-only SQL query against the Mail Envelope Index.
  * Uses bun:sqlite in-process — requires bun to have Full Disk Access.
  */
 function queryEnvelopeDb<T>(sql: string): T[] {
-  const db = new Database(CONFIG.ENVELOPE_DB, { readonly: true });
+  let db: Database;
+  try {
+    db = new Database(CONFIG.ENVELOPE_DB, { readonly: true });
+  } catch (error) {
+    if (String(error).includes("authorization denied")) {
+      // Callers swallow most errors into empty results; this one must surface.
+      throw new MailAccessError();
+    }
+    throw error;
+  }
   try {
     return db.query(sql).all() as T[];
   } finally {
@@ -47,6 +64,7 @@ interface EmailMessage {
   mailbox: string;
   to?: string;
   cc?: string;
+  category?: string;
   attachments?: EmailAttachment[];
 }
 
@@ -91,7 +109,14 @@ async function requestMailAccess(): Promise<{ hasAccess: boolean; message: strin
 /**
  * Get unread emails via Envelope Index SQLite database.
  */
-async function getUnreadMails(limit = 10): Promise<EmailMessage[]> {
+async function getUnreadMails(
+  limit = 10,
+  opts: { account?: string; mailbox?: string; category?: string } = {},
+): Promise<EmailMessage[]> {
+  let scope = "";
+  if (opts.account) scope += `\n  AND ${await accountCondition(opts.account)}`;
+  if (opts.mailbox) scope += `\n  AND ${mailboxCondition(opts.mailbox)}`;
+  if (opts.category) scope += `\n  AND ${categoryCondition(opts.category)}`;
   try {
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
     const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
@@ -101,24 +126,26 @@ SELECT ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address |
        datetime(m.date_sent, 'unixepoch', 'localtime') as dt,
        m.read,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
-       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
+       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview,
+       g.model_category as category
 FROM messages m
 JOIN subjects s ON m.subject = s.ROWID
 JOIN addresses a ON m.sender = a.ROWID
 JOIN mailboxes mb ON m.mailbox = mb.ROWID
 LEFT JOIN summaries sum2 ON m.summary = sum2.ROWID
+${CATEGORY_JOIN}
 WHERE m.read = 0
   AND mb.url NOT LIKE 'ews://%'
   AND mb.url NOT LIKE '%/All%20Mail'
   AND mb.url NOT LIKE '%/Alle%20e-mail'
   AND mb.url NOT LIKE '%/Spam'
-  AND mb.url NOT LIKE '%/Trash'
+  AND mb.url NOT LIKE '%/Trash'${scope}
 ORDER BY m.date_sent DESC
 LIMIT ${maxEmails};`;
 
     const rows = queryEnvelopeDb<{
       subject: string; sender: string; dt: string;
-      read: number; mailbox_name: string; preview: string;
+      read: number; mailbox_name: string; preview: string; category: number | null;
     }>(sql);
 
     return rows.map(row => ({
@@ -128,8 +155,10 @@ LIMIT ${maxEmails};`;
       isRead: false,
       mailbox: row.mailbox_name || "Unknown",
       content: row.preview || "",
+      category: categoryName(row.category),
     }));
   } catch (error) {
+    if (error instanceof MailAccessError) throw error;
     console.error(
       `Error getting unread emails: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -144,6 +173,7 @@ interface SearchMailsOpts {
   searchContent?: string;
   account?: string;
   mailbox?: string;
+  category?: string;
   limit?: number;
 }
 
@@ -177,6 +207,25 @@ function mailboxCondition(mailbox: string): string {
   return `mb.url LIKE '%${clean}%'`;
 }
 
+/**
+ * Apple Mail's own inbox categories (macOS Mail sorts every message with an on-device model).
+ * Proton's web categories are not exposed through Bridge, so these are the closest available.
+ */
+const CATEGORIES = ["primary", "transactions", "updates", "promotions"] as const;
+type MailCategory = (typeof CATEGORIES)[number];
+const CATEGORY_JOIN = "LEFT JOIN message_global_data g ON g.ROWID = m.global_message_id";
+
+function categoryName(n: number | null): string | undefined {
+  return n === null || n === undefined ? undefined : CATEGORIES[n];
+}
+
+/** SQL condition for one category; unknown names throw so the caller sees the valid list. */
+function categoryCondition(category: string): string {
+  const i = CATEGORIES.indexOf(category.trim().toLowerCase() as MailCategory);
+  if (i < 0) throw new Error(`Unknown category "${category}". Use one of: ${CATEGORIES.join(", ")}.`);
+  return `g.model_category = ${i}`;
+}
+
 /** SQL expression listing a message's To recipients. */
 const TO_SQL = `(SELECT group_concat(TRIM(COALESCE(ra.comment, '') || ' <' || ra.address || '>'), ', ')
    FROM recipients r JOIN addresses ra ON r.address = ra.ROWID
@@ -194,10 +243,11 @@ const TO_SQL = `(SELECT group_concat(TRIM(COALESCE(ra.comment, '') || ' <' || ra
  * An unknown account throws, so the caller can report it instead of "no results".
  */
 async function searchMails(opts: SearchMailsOpts): Promise<EmailMessage[]> {
-  const { searchTerm, searchSender, searchSubject, searchContent, account, mailbox } = opts;
+  const { searchTerm, searchSender, searchSubject, searchContent, account, mailbox, category } = opts;
   const scope: string[] = [];
   if (account) scope.push(await accountCondition(account));
   if (mailbox) scope.push(mailboxCondition(mailbox));
+  if (category) scope.push(categoryCondition(category));
   try {
     const limit = opts.limit || 10;
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
@@ -236,12 +286,14 @@ SELECT ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address |
        m.read,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
        SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview,
+       g.model_category as category,
        ${TO_SQL} as to_list
 FROM messages m
 JOIN subjects s ON m.subject = s.ROWID
 JOIN addresses a ON m.sender = a.ROWID
 JOIN mailboxes mb ON m.mailbox = mb.ROWID
 LEFT JOIN summaries sum2 ON m.summary = sum2.ROWID
+${CATEGORY_JOIN}
 WHERE ${whereClause}
   AND mb.url NOT LIKE 'ews://%'
   AND mb.url NOT LIKE '%/All%20Mail'
@@ -251,7 +303,7 @@ LIMIT ${maxEmails};`;
 
     const rows = queryEnvelopeDb<{
       subject: string; sender: string; dt: string;
-      read: number; mailbox_name: string; preview: string; to_list: string | null;
+      read: number; mailbox_name: string; preview: string; category: number | null; to_list: string | null;
     }>(sql);
 
     return rows.map(row => ({
@@ -261,9 +313,11 @@ LIMIT ${maxEmails};`;
       isRead: row.read !== 0,
       mailbox: row.mailbox_name || "Unknown",
       content: row.preview || "",
+      category: categoryName(row.category),
       to: row.to_list || undefined,
     }));
   } catch (error) {
+    if (error instanceof MailAccessError) throw error;
     console.error(
       `Error searching emails: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -274,8 +328,9 @@ LIMIT ${maxEmails};`;
 /**
  * Get latest emails (regardless of read status) via Envelope Index SQLite database.
  */
-async function getLatestMails(account?: string, limit = 5): Promise<EmailMessage[]> {
-  const scope = account ? `\n  AND ${await accountCondition(account)}` : "";
+async function getLatestMails(account?: string, limit = 5, category?: string): Promise<EmailMessage[]> {
+  let scope = account ? `\n  AND ${await accountCondition(account)}` : "";
+  if (category) scope += `\n  AND ${categoryCondition(category)}`;
   try {
     const maxEmails = Math.min(limit, CONFIG.MAX_EMAILS);
     const contentLen = CONFIG.MAX_CONTENT_PREVIEW;
@@ -285,12 +340,14 @@ SELECT ${SUBJECT_SQL} as subject, COALESCE(a.comment, '') || ' <' || a.address |
        datetime(m.date_sent, 'unixepoch', 'localtime') as dt,
        m.read,
        REPLACE(REPLACE(SUBSTR(mb.url, INSTR(mb.url, '://') + LENGTH('://') + 37), '%20', ' '), '%2F', '/') as mailbox_name,
-       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview
+       SUBSTR(COALESCE(sum2.summary, ''), 1, ${contentLen}) as preview,
+       g.model_category as category
 FROM messages m
 JOIN subjects s ON m.subject = s.ROWID
 JOIN addresses a ON m.sender = a.ROWID
 JOIN mailboxes mb ON m.mailbox = mb.ROWID
 LEFT JOIN summaries sum2 ON m.summary = sum2.ROWID
+${CATEGORY_JOIN}
 WHERE mb.url NOT LIKE 'ews://%'
   AND mb.url NOT LIKE '%/All%20Mail'
   AND mb.url NOT LIKE '%/Alle%20e-mail'
@@ -302,7 +359,7 @@ LIMIT ${maxEmails};`;
 
     const rows = queryEnvelopeDb<{
       subject: string; sender: string; dt: string;
-      read: number; mailbox_name: string; preview: string;
+      read: number; mailbox_name: string; preview: string; category: number | null;
     }>(sql);
 
     return rows.map(row => ({
@@ -312,8 +369,10 @@ LIMIT ${maxEmails};`;
       isRead: row.read !== 0,
       mailbox: row.mailbox_name || "Unknown",
       content: row.preview || "",
+      category: categoryName(row.category),
     }));
   } catch (error) {
+    if (error instanceof MailAccessError) throw error;
     console.error(
       `Error getting latest emails: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -935,130 +994,9 @@ WHERE r.message = ${msgId} ORDER BY r.type, r.position;`);
   }
 }
 
-/**
- * Get unread emails for a specific account (and optionally mailbox) via AppleScript.
- * Falls back to the general getUnreadMails if the account-specific query fails.
- */
-async function getUnreadMailsForAccount(
-  account: string,
-  mailbox?: string,
-  limit = 10,
-): Promise<EmailMessage[]> {
-  const script = `
-tell application "Mail"
-    set resultList to {}
-    try
-        set targetAccount to first account whose name is "${account.replace(/"/g, '\\"')}"
-
-        set acctMailboxes to every mailbox of targetAccount
-
-        set mailboxesToSearch to acctMailboxes
-        ${
-          mailbox
-            ? `
-        set mailboxesToSearch to {}
-        repeat with mb in acctMailboxes
-            if name of mb is "${mailbox.replace(/"/g, '\\"')}" then
-                set mailboxesToSearch to {mb}
-                exit repeat
-            end if
-        end repeat
-        `
-            : ""
-        }
-
-        repeat with mb in mailboxesToSearch
-            try
-                set unreadMessages to (messages of mb whose read status is false)
-                if (count of unreadMessages) > 0 then
-                    set msgLimit to ${limit}
-                    if (count of unreadMessages) < msgLimit then
-                        set msgLimit to (count of unreadMessages)
-                    end if
-
-                    repeat with i from 1 to msgLimit
-                        try
-                            set currentMsg to item i of unreadMessages
-                            set msgData to {subject:(subject of currentMsg), sender:(sender of currentMsg), \u00ac
-                                        date:(date sent of currentMsg) as string, mailbox:(name of mb)}
-
-                            try
-                                set msgContent to content of currentMsg
-                                if length of msgContent > 500 then
-                                    set msgContent to (text 1 thru 500 of msgContent) & "..."
-                                end if
-                                set msgData to msgData & {content:msgContent}
-                            on error
-                                set msgData to msgData & {content:"[Content not available]"}
-                            end try
-
-                            set end of resultList to msgData
-                        on error
-                            -- Skip problematic messages
-                        end try
-                    end repeat
-
-                    if (count of resultList) \u2265 ${limit} then exit repeat
-                end if
-            on error
-                -- Skip problematic mailboxes
-            end try
-        end repeat
-    on error errMsg
-        return "Error: " & errMsg
-    end try
-
-    return resultList
-end tell`;
-
-  try {
-    const asResult = await runAppleScript(script);
-    if (asResult && asResult.startsWith("Error:")) {
-      throw new Error(asResult);
-    }
-
-    const emailData: EmailMessage[] = [];
-    const matches = asResult.match(/\{([^}]+)\}/g);
-    if (matches && matches.length > 0) {
-      for (const match of matches) {
-        try {
-          const props = match.substring(1, match.length - 1).split(",");
-          const email: any = {};
-          props.forEach((prop) => {
-            const parts = prop.split(":");
-            if (parts.length >= 2) {
-              const key = parts[0].trim();
-              const value = parts.slice(1).join(":").trim();
-              email[key] = value;
-            }
-          });
-          if (email.subject || email.sender) {
-            emailData.push({
-              subject: email.subject || "No subject",
-              sender: email.sender || "Unknown sender",
-              dateSent: email.date || new Date().toString(),
-              content: email.content || "[Content not available]",
-              isRead: false,
-              mailbox: `${account} - ${email.mailbox || "Unknown"}`,
-            });
-          }
-        } catch (parseError) {
-          console.error("Error parsing email match:", parseError);
-        }
-      }
-    }
-
-    return emailData;
-  } catch (error) {
-    console.error("Error getting account-specific emails:", error);
-    // Fallback to general method
-    return getUnreadMails(limit);
-  }
-}
 
 export default {
   getUnreadMails,
-  getUnreadMailsForAccount,
   searchMails,
   sendMail,
   getMailboxes,
