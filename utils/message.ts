@@ -39,7 +39,14 @@ async function retryOperation<T>(operation: () => Promise<T>, retries = MAX_RETR
 function normalizePhoneNumber(phone: string): string[] {
     // Remove all non-numeric characters except +
     const cleaned = phone.replace(/[^0-9+]/g, '');
-    
+
+    // International numbers are already unambiguous; the US rules below would mangle them
+    // (e.g. +31612345678 became +1+31612345678).
+    if (/^\+(?!1)\d{7,14}$/.test(cleaned)) return [cleaned];
+    if (/^00[1-9]\d{6,13}$/.test(cleaned)) return [`+${cleaned.slice(2)}`];
+    // ponytail: a leading 0 is read as a Dutch national number, the owner's country.
+    if (/^0[1-9]\d{8}$/.test(cleaned)) return [`+31${cleaned.slice(1)}`];
+
     // If it's already in the correct format (+1XXXXXXXXXX), return just that
     if (/^\+1\d{10}$/.test(cleaned)) {
         return [cleaned];
